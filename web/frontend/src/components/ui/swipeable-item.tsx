@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, useAnimation, type PanInfo } from "framer-motion";
-import { Trash2, Wand2, StopCircle } from "lucide-react";
+import { Trash2, Wand2, StopCircle, Users } from "lucide-react";
 import { WandAdvancedIcon } from "@/components/icons/WandAdvancedIcon";
 import { useIsMobile } from "@/hooks/use-mobile";
 
@@ -8,8 +8,10 @@ interface SwipeableItemProps {
     children: ReactNode;
     onTranscribe: () => void;
     onTranscribeAdvanced: () => void;
+    onDiarize?: () => void;
     onDelete: () => void;
     onStop?: () => void;
+    canDiarize?: boolean;
     isProcessing?: boolean;
     isSelectionMode?: boolean;
     shouldShowHint?: boolean;
@@ -33,8 +35,10 @@ export function SwipeableItem({
     children,
     onTranscribe,
     onTranscribeAdvanced,
+    onDiarize,
     onDelete,
     onStop,
+    canDiarize = false,
     isProcessing = false,
     isSelectionMode = false,
     shouldShowHint = false,
@@ -51,8 +55,9 @@ export function SwipeableItem({
     const hasMovedRef = useRef(false);
     const suppressClickUntilRef = useRef(0);
 
-    // Width of the action buttons area (3 buttons × 44px + gaps + padding)
-    const OPEN_WIDTH = -160;
+    const actionCount = canDiarize && onDiarize && !isProcessing ? 4 : 3;
+    const actionAreaWidth = actionCount * 44 + (actionCount - 1) * 8 + 16;
+    const OPEN_WIDTH = -actionAreaWidth;
 
     const handleDragStart = (_event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
         isDraggingRef.current = true;
@@ -168,7 +173,10 @@ export function SwipeableItem({
             data-has-moved={hasMoved()}
         >
             {/* --- LAYER 0: The Action Buttons (Hidden underneath, mobile only) --- */}
-            <div className="absolute inset-y-0 right-0 w-[170px] flex items-center justify-end pr-2 gap-2 rounded-2xl z-0 md:hidden">
+            <div
+                className="absolute inset-y-0 right-0 flex items-center justify-end pr-2 gap-2 rounded-2xl z-0 md:hidden"
+                style={{ width: actionAreaWidth }}
+            >
                 {/* Transcribe (Primary) */}
                 <button
                     onClick={() => handleAction(onTranscribe)}
@@ -186,6 +194,16 @@ export function SwipeableItem({
                 >
                     <WandAdvancedIcon className="h-[18px] w-[18px]" />
                 </button>
+
+                {canDiarize && onDiarize && !isProcessing && (
+                    <button
+                        onClick={() => handleAction(onDiarize)}
+                        className="w-11 h-11 flex items-center justify-center rounded-full bg-blue-50 text-blue-600 shadow-sm active:scale-95 transition-transform cursor-pointer"
+                        aria-label="Diarize"
+                    >
+                        <Users size={18} />
+                    </button>
+                )}
 
                 {/* Delete or Stop (Destructive - furthest right) */}
                 {isProcessing && onStop ? (

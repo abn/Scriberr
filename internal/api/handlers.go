@@ -1033,6 +1033,64 @@ func (h *Handler) StartTranscription(c *gin.Context) {
 	c.JSON(http.StatusOK, job)
 }
 
+// @Summary Start diarization for a completed transcription
+// @Description Run speaker diarization against an existing transcript without rerunning transcription
+// @Tags transcription
+// @Accept json
+// @Produce json
+// @Param id path string true "Job ID"
+// @Param parameters body models.WhisperXParams true "Diarization parameters"
+// @Success 200 {object} models.TranscriptionJob
+// @Failure 400 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /api/v1/transcription/{id}/diarize [post]
+// @Security ApiKeyAuth
+// @Security BearerAuth
+func (h *Handler) StartDiarization(c *gin.Context) {
+	jobID := c.Param("id")
+
+	job, err := h.getJobForDiarization(c, jobID)
+	if err != nil {
+		return
+	}
+
+	requestParams, err := h.getValidatedTranscriptionParams(c, job, jobID)
+	if err != nil {
+		return
+	}
+
+	requestParams.Diarize = true
+	requestParams.DiarizationOnly = true
+	requestParams.IsMultiTrackEnabled = false
+	if requestParams.DiarizeModel == "" {
+		requestParams.DiarizeModel = transcription.ModelPyannote
+	}
+
+	job.Parameters = *requestParams
+	job.Diarization = true
+	job.Status = models.StatusPending
+	job.ErrorMessage = nil
+
+	if err := h.jobRepo.Update(c.Request.Context(), job); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update job"})
+		return
+	}
+
+	if err := h.taskQueue.EnqueueJob(jobID); err != nil {
+		logger.Error("Failed to enqueue diarization job", "job_id", jobID, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to enqueue diarization job"})
+		return
+	}
+
+	logger.Info("Diarization job started",
+		"job_id", jobID,
+		"diarize_model", requestParams.DiarizeModel,
+		"min_speakers", requestParams.MinSpeakers,
+		"max_speakers", requestParams.MaxSpeakers)
+
+	c.JSON(http.StatusOK, job)
+}
+
 func (h *Handler) getJobForTranscription(c *gin.Context, jobID string) (*models.TranscriptionJob, error) {
 	job, err := h.jobRepo.FindByID(c.Request.Context(), jobID)
 	if err != nil {
@@ -1049,6 +1107,35 @@ func (h *Handler) getJobForTranscription(c *gin.Context, jobID string) (*models.
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot start transcription: job is currently processing or pending"})
 		return nil, fmt.Errorf("invalid job status")
 	}
+	return job, nil
+}
+
+func (h *Handler) getJobForDiarization(c *gin.Context, jobID string) (*models.TranscriptionJob, error) {
+	job, err := h.jobRepo.FindByID(c.Request.Context(), jobID)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+			return nil, err
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get job"})
+		return nil, err
+	}
+
+	if job.Status == models.StatusProcessing || job.Status == models.StatusPending {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot start diarization: job is currently processing or pending"})
+		return nil, fmt.Errorf("invalid job status")
+	}
+
+	if job.IsMultiTrack {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Standalone diarization is not supported for multi-track recordings"})
+		return nil, fmt.Errorf("multi-track diarization unsupported")
+	}
+
+	if job.Transcript == nil || strings.TrimSpace(*job.Transcript) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot start diarization: job does not have an existing transcript"})
+		return nil, fmt.Errorf("missing transcript")
+	}
+
 	return job, nil
 }
 

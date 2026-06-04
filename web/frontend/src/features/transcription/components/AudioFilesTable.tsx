@@ -7,6 +7,7 @@ import {
 	Music,
 	FileAudio,
 	Wand2,
+	Users,
 	Check,
 	AlertCircle,
 	Clock,
@@ -234,6 +235,7 @@ export const AudioFilesTable = memo(function AudioFilesTable({
 	const [transcriptionLoading, setTranscriptionLoading] = useState(false);
 	const [killingJobs, setKillingJobs] = useState<Set<string>>(new Set());
 	const [transcribeDDialogOpen, setTranscribeDDialogOpen] = useState(false);
+	const [diarizeDialogOpen, setDiarizeDialogOpen] = useState(false);
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const [trackProgress, setTrackProgress] = useState<Record<string, any>>({});
 
@@ -307,6 +309,11 @@ export const AudioFilesTable = memo(function AudioFilesTable({
 	const handleTranscribeDClick = useCallback((jobId: string) => {
 		setSelectedJobId(jobId);
 		setTranscribeDDialogOpen(true);
+	}, []);
+
+	const handleDiarizeClick = useCallback((jobId: string) => {
+		setSelectedJobId(jobId);
+		setDiarizeDialogOpen(true);
 	}, []);
 
 	// Handle actual transcription start with parameters
@@ -398,6 +405,55 @@ export const AudioFilesTable = memo(function AudioFilesTable({
 			}
 		} catch {
 			alert("Error starting transcription");
+		} finally {
+			setTranscriptionLoading(false);
+		}
+	}, [selectedJobId, refetch, onTranscribe, data, getAuthHeaders]);
+
+	const handleStartDiarizationWithProfile = useCallback(async (params: WhisperXParams) => {
+		if (!selectedJobId) return;
+
+		const selectedJob = data.find(job => job.id === selectedJobId);
+		if (selectedJob?.is_multi_track) {
+			alert("Standalone diarization cannot be run on multi-track recordings.");
+			return;
+		}
+
+		if (selectedJob?.status !== "completed") {
+			alert("Diarization requires an existing completed transcript.");
+			return;
+		}
+
+		try {
+			setTranscriptionLoading(true);
+
+			const response = await fetch(`/api/v1/transcription/${selectedJobId}/diarize`, {
+				method: "POST",
+				headers: {
+					...getAuthHeaders(),
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					...params,
+					diarize: true,
+					diarization_only: true,
+					is_multi_track_enabled: false,
+				}),
+			});
+
+			if (response.ok) {
+				setDiarizeDialogOpen(false);
+				setSelectedJobId(null);
+				refetch();
+				if (onTranscribe) {
+					onTranscribe(selectedJobId);
+				}
+			} else {
+				const errorData = await response.json().catch(() => null);
+				alert(errorData?.error || "Failed to start diarization");
+			}
+		} catch {
+			alert("Error starting diarization");
 		} finally {
 			setTranscriptionLoading(false);
 		}
@@ -555,6 +611,10 @@ export const AudioFilesTable = memo(function AudioFilesTable({
 		} else {
 			handleStartTranscriptionWithProfile(params);
 		}
+	};
+
+	const onStartDiarizeWithProfile = (params: WhisperXParams) => {
+		handleStartDiarizationWithProfile(params);
 	};
 
 	// Initial load handled by useQuery
@@ -765,8 +825,10 @@ export const AudioFilesTable = memo(function AudioFilesTable({
 								key={file.id}
 								onTranscribe={() => handleTranscribeDClick(file.id)}
 								onTranscribeAdvanced={() => handleTranscribeClick(file.id)}
+								onDiarize={() => handleDiarizeClick(file.id)}
 								onDelete={() => handleDeleteClick(file)}
 								onStop={() => handleStopClick(file)}
+								canDiarize={file.status === "completed" && !file.is_multi_track}
 								isProcessing={file.status === "processing" || file.status === "pending"}
 								isSelectionMode={Object.keys(rowSelection).length > 0}
 								shouldShowHint={shouldShowHint && index === 0}
@@ -841,6 +903,22 @@ export const AudioFilesTable = memo(function AudioFilesTable({
 														</TooltipTrigger>
 														<TooltipContent>Transcribe (Advanced)</TooltipContent>
 													</Tooltip>
+
+													{file.status === "completed" && !file.is_multi_track && (
+														<Tooltip>
+															<TooltipTrigger asChild>
+																<Button
+																	variant="ghost"
+																	size="icon"
+																	onClick={() => handleDiarizeClick(file.id)}
+																	className="h-9 w-9 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 cursor-pointer transition-colors"
+																>
+																	<Users className="h-5 w-5" strokeWidth={2} />
+																</Button>
+															</TooltipTrigger>
+															<TooltipContent>Diarize</TooltipContent>
+														</Tooltip>
+													)}
 												</>
 											)}
 
@@ -1022,6 +1100,17 @@ export const AudioFilesTable = memo(function AudioFilesTable({
 				onOpenChange={setTranscribeDDialogOpen}
 				onStartTranscription={onStartTranscribeWithProfile}
 				loading={transcriptionLoading}
+			/>
+			<TranscribeDDialog
+				open={diarizeDialogOpen}
+				onOpenChange={setDiarizeDialogOpen}
+				onStartTranscription={onStartDiarizeWithProfile}
+				loading={transcriptionLoading}
+				title="Diarize with Profile"
+				description="Choose a saved profile and diarization settings to apply speaker labels to the existing transcript."
+				submitLabel="Start Diarization"
+				loadingLabel="Starting..."
+				forceDiarization
 			/>
 
 			{/* Stop Transcription Dialog */}

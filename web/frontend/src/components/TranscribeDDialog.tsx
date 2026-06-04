@@ -37,6 +37,10 @@ interface TranscribeDDialogProps {
   onStartTranscription: (params: WhisperXParams, profileId?: string) => void;
   loading?: boolean;
   title?: string;
+  description?: string;
+  submitLabel?: string;
+  loadingLabel?: string;
+  forceDiarization?: boolean;
 }
 
 type DiarizationModel = "pyannote" | "nvidia_sortformer";
@@ -47,6 +51,10 @@ export function TranscribeDDialog({
   onStartTranscription,
   loading = false,
   title,
+  description,
+  submitLabel = "Start Transcription",
+  loadingLabel = "Starting...",
+  forceDiarization = false,
 }: TranscribeDDialogProps) {
   const { getAuthHeaders } = useAuth();
   const [profiles, setProfiles] = useState<TranscriptionProfile[]>([]);
@@ -58,7 +66,7 @@ export function TranscribeDDialog({
   const [diarizationModel, setDiarizationModel] = useState<DiarizationModel>("pyannote");
 
   const selectedProfile = profiles.find(p => p.id === selectedProfileId);
-  const showDiarizationSettings = selectedProfile?.parameters.diarize ?? false;
+  const showDiarizationSettings = forceDiarization || (selectedProfile?.parameters.diarize ?? false);
   const minSpeakers = parseSpeakerLimit(minSpeakersInput);
   const maxSpeakers = parseSpeakerLimit(maxSpeakersInput);
   const hasInvalidSpeakerLimits = showDiarizationSettings && (
@@ -130,6 +138,7 @@ export function TranscribeDDialog({
 
     const params: WhisperXParams = { ...selectedProfile.parameters };
     if (showDiarizationSettings) {
+      params.diarize = true;
       params.diarize_model = diarizationModel;
       params.min_speakers = minSpeakers;
       params.max_speakers = maxSpeakers;
@@ -157,7 +166,7 @@ export function TranscribeDDialog({
             {title || "Transcribe with Profile"}
           </DialogTitle>
           <DialogDescription className="text-[var(--text-secondary)] text-sm mt-1.5">
-            Choose a saved profile to start transcription with your preferred settings.
+            {description || "Choose a saved profile to start transcription with your preferred settings."}
           </DialogDescription>
         </DialogHeader>
 
@@ -312,10 +321,10 @@ export function TranscribeDDialog({
             {loading ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Starting...
+                {loadingLabel}
               </>
             ) : (
-              "Start Transcription"
+              submitLabel
             )}
           </Button>
         </DialogFooter>

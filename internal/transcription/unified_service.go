@@ -287,6 +287,17 @@ func (u *UnifiedTranscriptionService) processSingleTrackJob(ctx context.Context,
 	var transcriptResult *interfaces.TranscriptResult
 	var diarizationResult *interfaces.DiarizationResult
 
+	if job.Parameters.DiarizationOnly {
+		if !job.Parameters.Diarize {
+			return fmt.Errorf("diarization-only job requires diarization to be enabled")
+		}
+
+		transcriptResult, err = u.loadExistingTranscriptResult(job)
+		if err != nil {
+			return fmt.Errorf("failed to load existing transcript for diarization: %w", err)
+		}
+	}
+
 	// Perform transcription using the preprocessed audio
 	if transcriptionModelID != "" {
 		logger.Info("Running transcription", "model_id", transcriptionModelID)
@@ -376,19 +387,21 @@ func (u *UnifiedTranscriptionService) IsMultiTrackJob(jobID string) bool {
 // selectModels determines which models to use based on job parameters
 func (u *UnifiedTranscriptionService) selectModels(params models.WhisperXParams) (transcriptionModelID, diarizationModelID string, err error) {
 	// Determine transcription model
-	switch params.ModelFamily {
-	case FamilyNvidiaParakeet:
-		transcriptionModelID = ModelParakeet
-	case FamilyNvidiaCanary:
-		transcriptionModelID = ModelCanary
-	case FamilyWhisper:
-		transcriptionModelID = ModelWhisperX
-	case FamilyOpenAI:
-		transcriptionModelID = ModelOpenAI
-	case FamilyMistralVoxtral:
-		transcriptionModelID = ModelVoxtral
-	default:
-		transcriptionModelID = ModelWhisperX // Default fallback
+	if !params.DiarizationOnly {
+		switch params.ModelFamily {
+		case FamilyNvidiaParakeet:
+			transcriptionModelID = ModelParakeet
+		case FamilyNvidiaCanary:
+			transcriptionModelID = ModelCanary
+		case FamilyWhisper:
+			transcriptionModelID = ModelWhisperX
+		case FamilyOpenAI:
+			transcriptionModelID = ModelOpenAI
+		case FamilyMistralVoxtral:
+			transcriptionModelID = ModelVoxtral
+		default:
+			transcriptionModelID = ModelWhisperX // Default fallback
+		}
 	}
 
 	// Determine diarization model if needed
@@ -850,6 +863,7 @@ func (u *UnifiedTranscriptionService) mergeDiarizationWithTranscription(transcri
 	// Assign speakers to transcript segments based on timing overlap
 	for i := range mergedTranscript.Segments {
 		segment := &mergedTranscript.Segments[i]
+		segment.Speaker = nil
 		bestSpeaker := u.findBestSpeakerForSegment(segment.Start, segment.End, diarization.Segments)
 		if bestSpeaker != "" {
 			segment.Speaker = &bestSpeaker
@@ -863,6 +877,7 @@ func (u *UnifiedTranscriptionService) mergeDiarizationWithTranscription(transcri
 
 		for i := range mergedTranscript.WordSegments {
 			word := &mergedTranscript.WordSegments[i]
+			word.Speaker = nil
 			bestSpeaker := u.findBestSpeakerForSegment(word.Start, word.End, diarization.Segments)
 			if bestSpeaker != "" {
 				word.Speaker = &bestSpeaker
@@ -891,6 +906,23 @@ func (u *UnifiedTranscriptionService) findBestSpeakerForSegment(start, end float
 	}
 
 	return bestSpeaker
+}
+
+func (u *UnifiedTranscriptionService) loadExistingTranscriptResult(job *models.TranscriptionJob) (*interfaces.TranscriptResult, error) {
+	if job.Transcript == nil || strings.TrimSpace(*job.Transcript) == "" {
+		return nil, fmt.Errorf("job has no transcript")
+	}
+
+	var result interfaces.TranscriptResult
+	if err := json.Unmarshal([]byte(*job.Transcript), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse transcript JSON: %w", err)
+	}
+
+	if len(result.Segments) == 0 {
+		return nil, fmt.Errorf("existing transcript has no timed segments")
+	}
+
+	return &result, nil
 }
 
 // saveTranscriptionResults saves the transcription results to the database

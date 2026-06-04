@@ -44,6 +44,7 @@ export interface WhisperXParams {
     vad_offset: number;
     chunk_size: number;
     diarize: boolean;
+    diarization_only?: boolean;
     min_speakers?: number;
     max_speakers?: number;
     diarize_model: string;
