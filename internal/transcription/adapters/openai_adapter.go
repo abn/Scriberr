@@ -102,7 +102,7 @@ func NewOpenAIAdapter(apiKey string) *OpenAIAdapter {
 			Name:        "timeout_minutes",
 			Type:        "int",
 			Required:    false,
-			Default:     10,
+			Default:     nil,
 			Min:         &[]float64{1}[0],
 			Description: "HTTP request timeout in minutes (increase for large files on self-hosted endpoints)",
 			Group:       "advanced",

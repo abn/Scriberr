@@ -661,7 +661,11 @@ func segmentDistance(a, b interfaces.DiarizationSegment) float64 {
 func rebuildSpeakerSummary(result *interfaces.DiarizationResult) {
 	speakers := make(map[string]float64)
 	for _, segment := range result.Segments {
-		speakers[segment.Speaker] += segment.End - segment.Start
+		duration := segment.End - segment.Start
+		if duration < 0 {
+			duration = 0
+		}
+		speakers[segment.Speaker] += duration
 	}
 
 	result.SpeakerCount = len(speakers)
