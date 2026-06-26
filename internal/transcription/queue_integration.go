@@ -5,6 +5,7 @@ import (
 	"os/exec"
 
 	"scriberr/internal/repository"
+	"scriberr/internal/transcription/adapters"
 	"scriberr/pkg/logger"
 )
 
@@ -77,6 +78,21 @@ func (u *UnifiedJobProcessor) GetSupportedModels() map[string]interface{} {
 // GetModelStatus returns the status of all models
 func (u *UnifiedJobProcessor) GetModelStatus(ctx context.Context) map[string]bool {
 	return u.unifiedService.GetModelStatus(ctx)
+}
+
+// GetPersistentDiarizationStatus returns the resident diarization worker state.
+func (u *UnifiedJobProcessor) GetPersistentDiarizationStatus() adapters.PersistentDiarizationStatus {
+	return u.unifiedService.GetPersistentDiarizationStatus()
+}
+
+// LoadPersistentDiarizationModel loads a diarization model into VRAM through a resident worker.
+func (u *UnifiedJobProcessor) LoadPersistentDiarizationModel(ctx context.Context, modelID string, params map[string]interface{}) (adapters.PersistentDiarizationStatus, error) {
+	return u.unifiedService.LoadPersistentDiarizationModel(ctx, modelID, params)
+}
+
+// UnloadPersistentDiarizationModel unloads the resident diarization worker.
+func (u *UnifiedJobProcessor) UnloadPersistentDiarizationModel(ctx context.Context) (adapters.PersistentDiarizationStatus, error) {
+	return u.unifiedService.UnloadPersistentDiarizationModel(ctx)
 }
 
 // ValidateModelParameters validates parameters for a specific model

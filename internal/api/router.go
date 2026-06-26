@@ -159,6 +159,15 @@ func SetupRoutes(handler *Handler, authService *auth.AuthService) *gin.Engine {
 			transcription.GET("/quick/:id", handler.GetQuickTranscriptionStatus)
 		}
 
+		// Persistent diarization worker routes (require authentication)
+		diarizationWorker := v1.Group("/diarization-worker")
+		diarizationWorker.Use(middleware.AuthMiddleware(authService))
+		{
+			diarizationWorker.GET("/status", handler.GetDiarizationWorkerStatus)
+			diarizationWorker.POST("/load", handler.LoadDiarizationWorker)
+			diarizationWorker.POST("/unload", handler.UnloadDiarizationWorker)
+		}
+
 		// Profile routes (require authentication)
 		profiles := v1.Group("/profiles")
 		profiles.Use(middleware.AuthMiddleware(authService))

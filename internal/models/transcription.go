@@ -151,6 +151,7 @@ type User struct {
 	Password                 string    `json:"-" gorm:"not null;type:varchar(255)"`
 	DefaultProfileID         *string   `json:"default_profile_id,omitempty" gorm:"type:varchar(36)"`
 	AutoTranscriptionEnabled bool      `json:"auto_transcription_enabled" gorm:"not null;default:false"`
+	StartupDiarizationModel  string    `json:"startup_diarization_model" gorm:"type:varchar(20);not null;default:'none'"`
 	CreatedAt                time.Time `json:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt                time.Time `json:"updated_at" gorm:"autoUpdateTime"`
 }

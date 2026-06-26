@@ -1,12 +1,21 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Upload, Mic, Settings, LogOut, Home, Plus, Grip, Zap, Youtube, Video, Users, MonitorSpeaker } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Upload, Mic, Settings, LogOut, Home, Plus, Grip, Zap, Youtube, Video, Users, MonitorSpeaker, BrainCircuit, Loader2 } from "lucide-react";
 import { ScriberrLogo } from "./ScriberrLogo";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { AudioRecorder } from "./AudioRecorder";
@@ -15,6 +24,7 @@ import { QuickTranscriptionDialog } from "@/features/transcription/components/Qu
 import { YouTubeDownloadDialog } from "@/features/transcription/components/YouTubeDownloadDialog";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/features/auth/hooks/useAuth";
+import { useToast } from "@/components/ui/toast";
 import { isVideoFile, isAudioFile } from "../utils/fileProcessor";
 import { useGlobalUpload } from "@/contexts/GlobalUploadContext";
 
@@ -29,15 +39,28 @@ interface HeaderProps {
 	onDownloadComplete?: () => void;
 }
 
+interface DiarizationWorkerStatus {
+	state: string;
+	loaded: boolean;
+	model_id?: string;
+	display_name?: string;
+	error?: string;
+}
+
 export function Header({ onFileSelect, onMultiTrackClick, onDownloadComplete }: HeaderProps) {
 	const navigate = useNavigate();
-	const { logout } = useAuth();
+	const { logout, getAuthHeaders } = useAuth();
+	const { toast } = useToast();
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const videoFileInputRef = useRef<HTMLInputElement>(null);
 	const [isRecorderOpen, setIsRecorderOpen] = useState(false);
 	const [isSystemRecorderOpen, setIsSystemRecorderOpen] = useState(false);
 	const [isQuickTranscriptionOpen, setIsQuickTranscriptionOpen] = useState(false);
 	const [isYouTubeDialogOpen, setIsYouTubeDialogOpen] = useState(false);
+	const [isDiarizationDialogOpen, setIsDiarizationDialogOpen] = useState(false);
+	const [diarizationStatus, setDiarizationStatus] = useState<DiarizationWorkerStatus>({ state: "unloaded", loaded: false });
+	const [selectedDiarizationModel, setSelectedDiarizationModel] = useState("pyannote");
+	const [isDiarizationActionRunning, setIsDiarizationActionRunning] = useState(false);
 
 	// Use global upload context as fallback when props are not provided
 	const globalUpload = useGlobalUpload();
@@ -46,6 +69,29 @@ export function Header({ onFileSelect, onMultiTrackClick, onDownloadComplete }: 
 	const effectiveFileSelect = onFileSelect ?? globalUpload.handleFileSelect;
 	const effectiveMultiTrackClick = onMultiTrackClick ?? globalUpload.openMultiTrackDialog;
 	const effectiveRecordingComplete = globalUpload.handleRecordingComplete;
+
+	const refreshDiarizationStatus = useCallback(async () => {
+		try {
+			const response = await fetch("/api/v1/diarization-worker/status", {
+				headers: getAuthHeaders(),
+			});
+			if (!response.ok) {
+				return null;
+			}
+
+			const status = await response.json();
+			setDiarizationStatus(status);
+			return status as DiarizationWorkerStatus;
+		} catch {
+			return null;
+		}
+	}, [getAuthHeaders]);
+
+	useEffect(() => {
+		refreshDiarizationStatus();
+		const interval = window.setInterval(refreshDiarizationStatus, 15000);
+		return () => window.clearInterval(interval);
+	}, [refreshDiarizationStatus]);
 
 	const handleUploadClick = () => {
 		fileInputRef.current?.click();
@@ -73,6 +119,72 @@ export function Header({ onFileSelect, onMultiTrackClick, onDownloadComplete }: 
 
 	const handleMultiTrackClick = () => {
 		effectiveMultiTrackClick();
+	};
+
+	const handleDiarizationWorkerClick = async () => {
+		await refreshDiarizationStatus();
+		setIsDiarizationDialogOpen(true);
+	};
+
+	const handleLoadDiarizationModel = async () => {
+		setIsDiarizationActionRunning(true);
+		try {
+			const response = await fetch("/api/v1/diarization-worker/load", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					...getAuthHeaders(),
+				},
+				body: JSON.stringify({
+					model: selectedDiarizationModel,
+					device: "auto",
+				}),
+			});
+			const body = await response.json().catch(() => ({}));
+
+			if (!response.ok) {
+				if (body.status) setDiarizationStatus(body.status);
+				throw new Error(body.error || "Failed to load diarization model");
+			}
+
+			setDiarizationStatus(body);
+			setIsDiarizationDialogOpen(false);
+			toast({ title: `${body.display_name || "Diarization model"} loaded` });
+		} catch (error) {
+			toast({
+				title: "Could not load diarization model",
+				description: error instanceof Error ? error.message : "Unknown error",
+			});
+		} finally {
+			setIsDiarizationActionRunning(false);
+		}
+	};
+
+	const handleUnloadDiarizationModel = async () => {
+		setIsDiarizationActionRunning(true);
+		try {
+			const response = await fetch("/api/v1/diarization-worker/unload", {
+				method: "POST",
+				headers: getAuthHeaders(),
+			});
+			const body = await response.json().catch(() => ({}));
+
+			if (!response.ok) {
+				if (body.status) setDiarizationStatus(body.status);
+				throw new Error(body.error || "Failed to unload diarization model");
+			}
+
+			setDiarizationStatus(body);
+			setIsDiarizationDialogOpen(false);
+			toast({ title: "Diarization model unloaded" });
+		} catch (error) {
+			toast({
+				title: "Could not unload diarization model",
+				description: error instanceof Error ? error.message : "Unknown error",
+			});
+		} finally {
+			setIsDiarizationActionRunning(false);
+		}
 	};
 
 	const handleSettingsClick = () => {
@@ -134,6 +246,11 @@ export function Header({ onFileSelect, onMultiTrackClick, onDownloadComplete }: 
 		await effectiveRecordingComplete(blob, title);
 	};
 
+	const isDiarizationBusy =
+		isDiarizationActionRunning ||
+		diarizationStatus.state === "loading" ||
+		diarizationStatus.state === "unloading";
+	const diarizationLabel = diarizationStatus.display_name || "Diarization model";
 
 	return (
 		<header className="sticky top-4 sm:top-6 z-50 glass rounded-[var(--radius-card)] px-4 py-3 sm:px-6 sm:py-4 transition-all duration-500 shadow-[var(--shadow-float)] border border-[var(--border-subtle)]">
@@ -260,6 +377,31 @@ export function Header({ onFileSelect, onMultiTrackClick, onDownloadComplete }: 
 						</DropdownMenuContent>
 					</DropdownMenu>
 
+					<Button
+						variant="ghost"
+						size="icon"
+						title={diarizationStatus.loaded ? `${diarizationLabel} loaded` : "Load diarization model"}
+						onClick={handleDiarizationWorkerClick}
+						disabled={isDiarizationBusy}
+						className={`relative h-8 w-8 sm:h-10 sm:w-10 rounded-[var(--radius-btn)] cursor-pointer ${
+							diarizationStatus.loaded
+								? "bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15"
+								: "text-[var(--text-secondary)] hover:bg-[var(--secondary)]"
+						}`}
+					>
+						{isDiarizationBusy ? (
+							<Loader2 className="h-4 w-4 sm:h-5 sm:w-5 animate-spin" />
+						) : (
+							<BrainCircuit className="h-4 w-4 sm:h-5 sm:w-5" />
+						)}
+						{diarizationStatus.loaded && (
+							<span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-[var(--bg-card)]" />
+						)}
+						<span className="sr-only">
+							{diarizationStatus.loaded ? "Unload diarization model" : "Load diarization model"}
+						</span>
+					</Button>
+
 					{/* Main Menu (Grip) */}
 					<DropdownMenu>
 						<DropdownMenuTrigger asChild>
@@ -339,6 +481,77 @@ export function Header({ onFileSelect, onMultiTrackClick, onDownloadComplete }: 
 				onClose={() => setIsYouTubeDialogOpen(false)}
 				onDownloadComplete={onDownloadComplete}
 			/>
+
+			<Dialog open={isDiarizationDialogOpen} onOpenChange={setIsDiarizationDialogOpen}>
+				<DialogContent className="bg-[var(--bg-card)] border border-[var(--border-subtle)] text-[var(--text-primary)]">
+					{diarizationStatus.loaded ? (
+						<>
+							<DialogHeader>
+								<DialogTitle>Unload diarization model?</DialogTitle>
+								<DialogDescription>
+									{diarizationLabel} is currently loaded in GPU memory.
+								</DialogDescription>
+							</DialogHeader>
+							<DialogFooter>
+								<Button
+									variant="ghost"
+									onClick={() => setIsDiarizationDialogOpen(false)}
+									disabled={isDiarizationActionRunning}
+								>
+									Cancel
+								</Button>
+								<Button
+									variant="destructive"
+									onClick={handleUnloadDiarizationModel}
+									disabled={isDiarizationActionRunning}
+								>
+									{isDiarizationActionRunning && <Loader2 className="h-4 w-4 animate-spin" />}
+									Unload
+								</Button>
+							</DialogFooter>
+						</>
+					) : (
+						<>
+							<DialogHeader>
+								<DialogTitle>Load diarization model</DialogTitle>
+								<DialogDescription>
+									Choose a diarization model to keep loaded in GPU memory.
+								</DialogDescription>
+							</DialogHeader>
+							<div className="space-y-2">
+								<Select value={selectedDiarizationModel} onValueChange={setSelectedDiarizationModel}>
+									<SelectTrigger className="w-full bg-[var(--bg-main)] border-[var(--border-subtle)] text-[var(--text-primary)]">
+										<SelectValue placeholder="Choose a model" />
+									</SelectTrigger>
+									<SelectContent className="bg-[var(--bg-card)] border-[var(--border-subtle)] text-[var(--text-primary)]">
+										<SelectItem value="pyannote" className="focus:bg-[var(--bg-secondary)] focus:text-[var(--text-primary)]">PyAnnote</SelectItem>
+										<SelectItem value="sortformer" className="focus:bg-[var(--bg-secondary)] focus:text-[var(--text-primary)]">Sortformer</SelectItem>
+									</SelectContent>
+								</Select>
+								{diarizationStatus.state === "failed" && diarizationStatus.error && (
+									<p className="text-sm text-[var(--error)]">{diarizationStatus.error}</p>
+								)}
+							</div>
+							<DialogFooter>
+								<Button
+									variant="ghost"
+									onClick={() => setIsDiarizationDialogOpen(false)}
+									disabled={isDiarizationActionRunning}
+								>
+									Cancel
+								</Button>
+								<Button
+									onClick={handleLoadDiarizationModel}
+									disabled={isDiarizationActionRunning}
+								>
+									{isDiarizationActionRunning && <Loader2 className="h-4 w-4 animate-spin" />}
+									Load
+								</Button>
+							</DialogFooter>
+						</>
+					)}
+				</DialogContent>
+			</Dialog>
 
 		</header>
 	);

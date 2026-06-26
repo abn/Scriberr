@@ -14,6 +14,7 @@ import (
 	"scriberr/internal/models"
 	"scriberr/internal/repository"
 	"scriberr/internal/sse"
+	"scriberr/internal/transcription/adapters"
 	"scriberr/internal/transcription/interfaces"
 	"scriberr/internal/transcription/pipeline"
 	"scriberr/internal/transcription/registry"
@@ -286,6 +287,10 @@ func (u *UnifiedTranscriptionService) processSingleTrackJob(ctx context.Context,
 
 	var transcriptResult *interfaces.TranscriptResult
 	var diarizationResult *interfaces.DiarizationResult
+	useSeparateDiarization := job.Parameters.Diarize &&
+		diarizationModelID != "" &&
+		(!u.transcriptionIncludesDiarization(transcriptionModelID, job.Parameters) ||
+			adapters.GetPersistentDiarizationManager().IsModelLoaded(diarizationModelID))
 
 	if job.Parameters.DiarizationOnly {
 		if !job.Parameters.Diarize {
@@ -307,7 +312,11 @@ func (u *UnifiedTranscriptionService) processSingleTrackJob(ctx context.Context,
 		}
 
 		// Convert parameters for this specific model
-		params := u.convertParametersForModel(job.Parameters, transcriptionModelID)
+		transcriptionParams := job.Parameters
+		if useSeparateDiarization && transcriptionModelID == ModelWhisperX {
+			transcriptionParams.Diarize = false
+		}
+		params := u.convertParametersForModel(transcriptionParams, transcriptionModelID)
 
 		transcriptResult, err = transcriptionAdapter.Transcribe(ctx, preprocessedInput, params, procCtx)
 		if err != nil {
@@ -320,7 +329,7 @@ func (u *UnifiedTranscriptionService) processSingleTrackJob(ctx context.Context,
 		// Convert parameters for diarization model
 		diarizationParams := u.convertParametersForModel(job.Parameters, diarizationModelID)
 
-		if !u.transcriptionIncludesDiarization(transcriptionModelID, job.Parameters) {
+		if useSeparateDiarization {
 			logger.Info("Running separate diarization", "model_id", diarizationModelID)
 			diarizationAdapter, err := u.registry.GetDiarizationAdapter(diarizationModelID)
 			if err != nil {
@@ -961,6 +970,21 @@ func (u *UnifiedTranscriptionService) GetSupportedModels() map[string]interfaces
 // GetModelStatus returns the status of all models
 func (u *UnifiedTranscriptionService) GetModelStatus(ctx context.Context) map[string]bool {
 	return u.registry.GetModelStatus(ctx)
+}
+
+// GetPersistentDiarizationStatus returns the resident diarization worker state.
+func (u *UnifiedTranscriptionService) GetPersistentDiarizationStatus() adapters.PersistentDiarizationStatus {
+	return adapters.GetPersistentDiarizationManager().Status()
+}
+
+// LoadPersistentDiarizationModel loads a diarization model into a resident worker.
+func (u *UnifiedTranscriptionService) LoadPersistentDiarizationModel(ctx context.Context, modelID string, params map[string]interface{}) (adapters.PersistentDiarizationStatus, error) {
+	return adapters.GetPersistentDiarizationManager().Load(ctx, modelID, params)
+}
+
+// UnloadPersistentDiarizationModel unloads the resident diarization worker.
+func (u *UnifiedTranscriptionService) UnloadPersistentDiarizationModel(ctx context.Context) (adapters.PersistentDiarizationStatus, error) {
+	return adapters.GetPersistentDiarizationManager().Unload(ctx)
 }
 
 // ValidateModelParameters validates parameters for a specific model

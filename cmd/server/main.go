@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -125,6 +126,7 @@ func main() {
 		logger.Error("Failed to prepare Python environment", "error", err)
 		os.Exit(1)
 	}
+	loadStartupDiarizationModel(context.Background(), userRepo, unifiedProcessor)
 
 	// Initialize quick transcription service
 	logger.Startup("quick-transcription", "Initializing quick transcription service")
@@ -247,4 +249,33 @@ func registerAdapters(cfg *config.Config) {
 		adapters.NewSortformerAdapter(nvidiaEnvPath)) // Shares with Parakeet
 
 	logger.Info("Adapter registration complete")
+}
+
+func loadStartupDiarizationModel(ctx context.Context, userRepo repository.UserRepository, unifiedProcessor *transcription.UnifiedJobProcessor) {
+	users, _, err := userRepo.List(ctx, 0, 100)
+	if err != nil {
+		logger.Warn("Failed to load startup diarization preference", "error", err)
+		return
+	}
+
+	for _, user := range users {
+		modelID := strings.TrimSpace(strings.ToLower(user.StartupDiarizationModel))
+		if modelID == "" || modelID == "none" {
+			continue
+		}
+
+		logger.Startup("diarization", "Loading persistent diarization model configured for startup")
+		loadCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		status, err := unifiedProcessor.LoadPersistentDiarizationModel(loadCtx, modelID, map[string]interface{}{
+			"device": "auto",
+		})
+		cancel()
+		if err != nil {
+			logger.Warn("Failed to load startup diarization model", "model_id", modelID, "user_id", user.ID, "error", err)
+			return
+		}
+
+		logger.Info("Startup diarization model loaded", "model_id", status.ModelID, "pid", status.PID)
+		return
+	}
 }

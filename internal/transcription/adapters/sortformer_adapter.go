@@ -25,6 +25,8 @@ type SortformerAdapter struct {
 
 // NewSortformerAdapter creates a new NVIDIA Sortformer diarization adapter
 func NewSortformerAdapter(envPath string) *SortformerAdapter {
+	GetPersistentDiarizationManager().SetEnvironment(PersistentDiarizationModelSortformer, envPath)
+
 	capabilities := interfaces.ModelCapabilities{
 		ModelID:            "sortformer",
 		ModelFamily:        "nvidia_sortformer",
@@ -162,6 +164,7 @@ func (s *SortformerAdapter) GetMinSpeakers() int {
 // PrepareEnvironment sets up the Sortformer environment (shared with NVIDIA models)
 func (s *SortformerAdapter) PrepareEnvironment(ctx context.Context) error {
 	logger.Info("Preparing NVIDIA Sortformer environment", "env_path", s.envPath)
+	GetPersistentDiarizationManager().SetEnvironment(PersistentDiarizationModelSortformer, s.envPath)
 
 	// Copy diarization script
 	if err := s.copyDiarizationScript(); err != nil {
@@ -279,14 +282,17 @@ func (s *SortformerAdapter) copyDiarizationScript() error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	scriptContent, err := nvidiaScripts.ReadFile("py/nvidia/sortformer_diarize.py")
-	if err != nil {
-		return fmt.Errorf("failed to read embedded sortformer_diarize.py: %w", err)
-	}
+	scripts := []string{"sortformer_diarize.py", "sortformer_worker.py"}
+	for _, scriptName := range scripts {
+		scriptContent, err := nvidiaScripts.ReadFile(filepath.Join("py/nvidia", scriptName))
+		if err != nil {
+			return fmt.Errorf("failed to read embedded %s: %w", scriptName, err)
+		}
 
-	scriptPath := filepath.Join(s.envPath, "sortformer_diarize.py")
-	if err := os.WriteFile(scriptPath, scriptContent, 0755); err != nil {
-		return fmt.Errorf("failed to write diarization script: %w", err)
+		scriptPath := filepath.Join(s.envPath, scriptName)
+		if err := os.WriteFile(scriptPath, scriptContent, 0755); err != nil {
+			return fmt.Errorf("failed to write %s: %w", scriptName, err)
+		}
 	}
 
 	return nil
@@ -326,6 +332,19 @@ func (s *SortformerAdapter) Diarize(ctx context.Context, input interfaces.AudioI
 		} else {
 			audioInput = convertedInput
 		}
+	}
+
+	if GetPersistentDiarizationManager().IsModelLoaded(PersistentDiarizationModelSortformer) {
+		result, err := s.diarizeWithPersistentWorker(ctx, audioInput, params, tempDir)
+		if err != nil {
+			return nil, err
+		}
+
+		result.ProcessingTime = time.Since(startTime)
+		result.ModelUsed = "diar_streaming_sortformer_4spk-v2"
+		result.Metadata = s.CreateDefaultMetadata(params)
+		result.Metadata["execution_mode"] = "persistent_worker"
+		return result, nil
 	}
 
 	// Build command arguments
@@ -380,6 +399,44 @@ func (s *SortformerAdapter) Diarize(ctx context.Context, input interfaces.AudioI
 		"segments", len(result.Segments),
 		"speakers", result.SpeakerCount,
 		"processing_time", result.ProcessingTime)
+
+	return result, nil
+}
+
+func (s *SortformerAdapter) diarizeWithPersistentWorker(ctx context.Context, input interfaces.AudioInput, params map[string]interface{}, tempDir string) (*interfaces.DiarizationResult, error) {
+	outputFormat := s.GetStringParameter(params, "output_format")
+	outputFile := filepath.Join(tempDir, "result.rttm")
+	if outputFormat == OutputFormatJSON {
+		outputFile = filepath.Join(tempDir, "result.json")
+	}
+
+	request := map[string]interface{}{
+		"audio_file":    input.FilePath,
+		"output_file":   outputFile,
+		"output_format": outputFormat,
+	}
+	if batchSize := s.GetIntParameter(params, "batch_size"); batchSize > 0 {
+		request["batch_size"] = batchSize
+	}
+	if maxSpeakers := s.GetIntParameter(params, "max_speakers"); maxSpeakers > 0 {
+		request["max_speakers"] = maxSpeakers
+	}
+	if s.GetBoolParameter(params, "streaming_mode") {
+		request["streaming_mode"] = true
+		if chunkLength := s.GetFloatParameter(params, "chunk_length_s"); chunkLength > 0 {
+			request["chunk_length_s"] = chunkLength
+		}
+	}
+
+	logger.Info("Executing Sortformer via persistent worker", "audio_file", input.FilePath, "output_file", outputFile)
+	if err := GetPersistentDiarizationManager().Diarize(ctx, PersistentDiarizationModelSortformer, request); err != nil {
+		return nil, fmt.Errorf("persistent Sortformer execution failed: %w", err)
+	}
+
+	result, err := s.parseResult(tempDir, input, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse persistent Sortformer result: %w", err)
+	}
 
 	return result, nil
 }

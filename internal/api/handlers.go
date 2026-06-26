@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -104,6 +105,13 @@ type SubmitJobRequest struct {
 	Title       *string               `json:"title,omitempty"`
 	Diarization bool                  `json:"diarization"`
 	Parameters  models.WhisperXParams `json:"parameters"`
+}
+
+// DiarizationWorkerLoadRequest represents a persistent diarization model load request.
+type DiarizationWorkerLoadRequest struct {
+	Model   string `json:"model" binding:"required"`
+	Device  string `json:"device,omitempty"`
+	HfToken string `json:"hf_token,omitempty"`
 }
 
 // LoginRequest represents the login request
@@ -2251,6 +2259,82 @@ func (h *Handler) GetSupportedModels(c *gin.Context) {
 	})
 }
 
+// @Summary Get persistent diarization worker status
+// @Description Get the currently loaded resident diarization model, if any
+// @Tags transcription
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Router /api/v1/diarization-worker/status [get]
+// @Security ApiKeyAuth
+// @Security BearerAuth
+func (h *Handler) GetDiarizationWorkerStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, h.unifiedProcessor.GetPersistentDiarizationStatus())
+}
+
+// @Summary Load persistent diarization model
+// @Description Load PyAnnote or NVIDIA Sortformer into a resident worker process
+// @Tags transcription
+// @Accept json
+// @Produce json
+// @Param request body DiarizationWorkerLoadRequest true "Model load request"
+// @Success 200 {object} map[string]interface{}
+// @Router /api/v1/diarization-worker/load [post]
+// @Security ApiKeyAuth
+// @Security BearerAuth
+func (h *Handler) LoadDiarizationWorker(c *gin.Context) {
+	var req DiarizationWorkerLoadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	params := map[string]interface{}{}
+	if req.Device != "" {
+		params["device"] = req.Device
+	}
+	if req.HfToken != "" {
+		params["hf_token"] = req.HfToken
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Minute)
+	defer cancel()
+
+	status, err := h.unifiedProcessor.LoadPersistentDiarizationModel(ctx, req.Model, params)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":  err.Error(),
+			"status": status,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
+}
+
+// @Summary Unload persistent diarization model
+// @Description Stop the resident diarization worker and release its VRAM
+// @Tags transcription
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Router /api/v1/diarization-worker/unload [post]
+// @Security ApiKeyAuth
+// @Security BearerAuth
+func (h *Handler) UnloadDiarizationWorker(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	status, err := h.unifiedProcessor.UnloadPersistentDiarizationModel(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":  err.Error(),
+			"status": status,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
+}
+
 // Health check endpoint
 // @Summary Health check
 // @Description Check if the API is healthy
@@ -2890,11 +2974,13 @@ func (h *Handler) SetUserDefaultProfile(c *gin.Context) {
 type UserSettingsResponse struct {
 	AutoTranscriptionEnabled bool    `json:"auto_transcription_enabled"`
 	DefaultProfileID         *string `json:"default_profile_id,omitempty"`
+	StartupDiarizationModel  string  `json:"startup_diarization_model"`
 }
 
 // UpdateUserSettingsRequest represents the request to update user settings
 type UpdateUserSettingsRequest struct {
-	AutoTranscriptionEnabled *bool `json:"auto_transcription_enabled,omitempty"`
+	AutoTranscriptionEnabled *bool   `json:"auto_transcription_enabled,omitempty"`
+	StartupDiarizationModel  *string `json:"startup_diarization_model,omitempty"`
 }
 
 // @Summary Get user settings
@@ -2922,6 +3008,7 @@ func (h *Handler) GetUserSettings(c *gin.Context) {
 	response := UserSettingsResponse{
 		AutoTranscriptionEnabled: user.AutoTranscriptionEnabled,
 		DefaultProfileID:         user.DefaultProfileID,
+		StartupDiarizationModel:  normalizeStartupDiarizationSetting(user.StartupDiarizationModel),
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -2962,6 +3049,14 @@ func (h *Handler) UpdateUserSettings(c *gin.Context) {
 	if req.AutoTranscriptionEnabled != nil {
 		user.AutoTranscriptionEnabled = *req.AutoTranscriptionEnabled
 	}
+	if req.StartupDiarizationModel != nil {
+		normalized, ok := validateStartupDiarizationSetting(*req.StartupDiarizationModel)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "startup_diarization_model must be one of: none, pyannote, sortformer"})
+			return
+		}
+		user.StartupDiarizationModel = normalized
+	}
 
 	// Save updated user
 	if err := h.userRepo.Update(c.Request.Context(), user); err != nil {
@@ -2972,9 +3067,33 @@ func (h *Handler) UpdateUserSettings(c *gin.Context) {
 	response := UserSettingsResponse{
 		AutoTranscriptionEnabled: user.AutoTranscriptionEnabled,
 		DefaultProfileID:         user.DefaultProfileID,
+		StartupDiarizationModel:  normalizeStartupDiarizationSetting(user.StartupDiarizationModel),
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+func validateStartupDiarizationSetting(value string) (string, bool) {
+	normalized := normalizeStartupDiarizationSetting(value)
+	switch normalized {
+	case "none", "pyannote", "sortformer":
+		return normalized, true
+	default:
+		return "", false
+	}
+}
+
+func normalizeStartupDiarizationSetting(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "", "none":
+		return "none"
+	case "pyannote", "pyannote/speaker-diarization-3.1", "pyannote/speaker-diarization-community-1":
+		return "pyannote"
+	case "sortformer", "nvidia_sortformer", "nvidia/diar_streaming_sortformer_4spk-v2":
+		return "sortformer"
+	default:
+		return strings.TrimSpace(strings.ToLower(value))
+	}
 }
 
 // @Summary SSE Events

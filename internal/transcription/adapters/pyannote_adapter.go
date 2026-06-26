@@ -29,6 +29,8 @@ type PyAnnoteAdapter struct {
 
 // NewPyAnnoteAdapter creates a new PyAnnote diarization adapter
 func NewPyAnnoteAdapter(envPath string) *PyAnnoteAdapter {
+	GetPersistentDiarizationManager().SetEnvironment(PersistentDiarizationModelPyAnnote, envPath)
+
 	capabilities := interfaces.ModelCapabilities{
 		ModelID:            "pyannote",
 		ModelFamily:        "pyannote",
@@ -181,6 +183,7 @@ func (p *PyAnnoteAdapter) GetMinSpeakers() int {
 // PrepareEnvironment sets up the dedicated PyAnnote environment
 func (p *PyAnnoteAdapter) PrepareEnvironment(ctx context.Context) error {
 	logger.Info("Preparing PyAnnote environment", "env_path", p.envPath)
+	GetPersistentDiarizationManager().SetEnvironment(PersistentDiarizationModelPyAnnote, p.envPath)
 
 	// Always ensure diarization script exists
 	if err := p.copyDiarizationScript(); err != nil {
@@ -259,14 +262,17 @@ func (p *PyAnnoteAdapter) copyDiarizationScript() error {
 		return fmt.Errorf("failed to create pyannote directory: %w", err)
 	}
 
-	scriptContent, err := pyannoteScripts.ReadFile("py/pyannote/pyannote_diarize.py")
-	if err != nil {
-		return fmt.Errorf("failed to read embedded pyannote_diarize.py: %w", err)
-	}
+	scripts := []string{"pyannote_diarize.py", "pyannote_worker.py"}
+	for _, scriptName := range scripts {
+		scriptContent, err := pyannoteScripts.ReadFile(filepath.Join("py/pyannote", scriptName))
+		if err != nil {
+			return fmt.Errorf("failed to read embedded %s: %w", scriptName, err)
+		}
 
-	scriptPath := filepath.Join(p.envPath, "pyannote_diarize.py")
-	if err := os.WriteFile(scriptPath, scriptContent, 0755); err != nil {
-		return fmt.Errorf("failed to write diarization script: %w", err)
+		scriptPath := filepath.Join(p.envPath, scriptName)
+		if err := os.WriteFile(scriptPath, scriptContent, 0755); err != nil {
+			return fmt.Errorf("failed to write %s: %w", scriptName, err)
+		}
 	}
 
 	return nil
@@ -295,11 +301,13 @@ func (p *PyAnnoteAdapter) Diarize(ctx context.Context, input interfaces.AudioInp
 	if hfToken == "" {
 		hfToken = os.Getenv("HF_TOKEN")
 	}
-	if hfToken == "" {
+	if hfToken == "" && !GetPersistentDiarizationManager().IsModelLoaded(PersistentDiarizationModelPyAnnote) {
 		return nil, fmt.Errorf("HuggingFace token is required for PyAnnote diarization. Set HF_TOKEN environment variable or provide it in the UI")
 	}
-	// Store resolved token in params for buildPyAnnoteArgs
-	params["hf_token"] = hfToken
+	if hfToken != "" {
+		// Store resolved token in params for buildPyAnnoteArgs
+		params["hf_token"] = hfToken
+	}
 
 	// Create temporary directory
 	tempDir, err := p.CreateTempDirectory(procCtx)
@@ -307,6 +315,19 @@ func (p *PyAnnoteAdapter) Diarize(ctx context.Context, input interfaces.AudioInp
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer p.CleanupTempDirectory(tempDir)
+
+	if GetPersistentDiarizationManager().IsModelLoaded(PersistentDiarizationModelPyAnnote) {
+		result, err := p.diarizeWithPersistentWorker(ctx, input, params, tempDir)
+		if err != nil {
+			return nil, err
+		}
+
+		result.ProcessingTime = time.Since(startTime)
+		result.ModelUsed = p.GetStringParameter(params, "model")
+		result.Metadata = p.CreateDefaultMetadata(params)
+		result.Metadata["execution_mode"] = "persistent_worker"
+		return result, nil
+	}
 
 	// Build command arguments
 	args, err := p.buildPyAnnoteArgs(input, params, tempDir)
@@ -360,6 +381,45 @@ func (p *PyAnnoteAdapter) Diarize(ctx context.Context, input interfaces.AudioInp
 		"segments", len(result.Segments),
 		"speakers", result.SpeakerCount,
 		"processing_time", result.ProcessingTime)
+
+	return result, nil
+}
+
+func (p *PyAnnoteAdapter) diarizeWithPersistentWorker(ctx context.Context, input interfaces.AudioInput, params map[string]interface{}, tempDir string) (*interfaces.DiarizationResult, error) {
+	outputFormat := p.GetStringParameter(params, "output_format")
+	outputFile := filepath.Join(tempDir, "result.rttm")
+	if outputFormat == OutputFormatJSON {
+		outputFile = filepath.Join(tempDir, "result.json")
+	}
+
+	request := map[string]interface{}{
+		"audio_file":    input.FilePath,
+		"output_file":   outputFile,
+		"output_format": outputFormat,
+	}
+
+	if minSpeakers := p.GetIntParameter(params, "min_speakers"); minSpeakers > 0 {
+		request["min_speakers"] = minSpeakers
+	}
+	if maxSpeakers := p.GetIntParameter(params, "max_speakers"); maxSpeakers > 0 {
+		request["max_speakers"] = maxSpeakers
+	}
+	if onset := p.GetFloatParameter(params, "segmentation_onset"); onset > 0 {
+		request["segmentation_onset"] = onset
+	}
+	if offset := p.GetFloatParameter(params, "segmentation_offset"); offset > 0 {
+		request["segmentation_offset"] = offset
+	}
+
+	logger.Info("Executing PyAnnote via persistent worker", "audio_file", input.FilePath, "output_file", outputFile)
+	if err := GetPersistentDiarizationManager().Diarize(ctx, PersistentDiarizationModelPyAnnote, request); err != nil {
+		return nil, fmt.Errorf("persistent PyAnnote execution failed: %w", err)
+	}
+
+	result, err := p.parseResult(tempDir, input, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse persistent PyAnnote result: %w", err)
+	}
 
 	return result, nil
 }
