@@ -2292,8 +2292,12 @@ func (h *Handler) LoadDiarizationWorker(c *gin.Context) {
 	if req.Device != "" {
 		params["device"] = req.Device
 	}
-	if req.HfToken != "" {
-		params["hf_token"] = req.HfToken
+	if hfToken := strings.TrimSpace(req.HfToken); hfToken != "" {
+		params["hf_token"] = hfToken
+	} else if isPyAnnoteWorkerModel(req.Model) {
+		if hfToken := h.resolveDiarizationWorkerHFToken(c); hfToken != "" {
+			params["hf_token"] = hfToken
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Minute)
@@ -2309,6 +2313,49 @@ func (h *Handler) LoadDiarizationWorker(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, status)
+}
+
+func isPyAnnoteWorkerModel(model string) bool {
+	switch strings.TrimSpace(strings.ToLower(model)) {
+	case "pyannote", "pyannote/speaker-diarization-3.1", "pyannote/speaker-diarization-community-1":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) resolveDiarizationWorkerHFToken(c *gin.Context) string {
+	profile := h.resolveRequestDefaultProfile(c)
+	if profile != nil && profile.Parameters.HfToken != nil {
+		hfToken := strings.TrimSpace(*profile.Parameters.HfToken)
+		if hfToken != "" {
+			logger.Info("Resolved HF token from transcription profile for diarization worker load", "profile_id", profile.ID)
+			return hfToken
+		}
+	}
+
+	return strings.TrimSpace(os.Getenv("HF_TOKEN"))
+}
+
+func (h *Handler) resolveRequestDefaultProfile(c *gin.Context) *models.TranscriptionProfile {
+	if userID, exists := c.Get("user_id"); exists {
+		if user, err := h.userRepo.FindByID(c.Request.Context(), userID.(uint)); err == nil && user.DefaultProfileID != nil {
+			if profile, err := h.profileRepo.FindByID(c.Request.Context(), *user.DefaultProfileID); err == nil {
+				return profile
+			}
+		}
+	}
+
+	if profile, err := h.profileRepo.FindDefault(c.Request.Context()); err == nil {
+		return profile
+	}
+
+	profiles, _, err := h.profileRepo.List(c.Request.Context(), 0, 1)
+	if err != nil || len(profiles) == 0 {
+		return nil
+	}
+
+	return &profiles[0]
 }
 
 // @Summary Unload persistent diarization model

@@ -126,7 +126,7 @@ func main() {
 		logger.Error("Failed to prepare Python environment", "error", err)
 		os.Exit(1)
 	}
-	loadStartupDiarizationModel(context.Background(), userRepo, unifiedProcessor)
+	loadStartupDiarizationModel(context.Background(), userRepo, profileRepo, unifiedProcessor)
 
 	// Initialize quick transcription service
 	logger.Startup("quick-transcription", "Initializing quick transcription service")
@@ -251,7 +251,7 @@ func registerAdapters(cfg *config.Config) {
 	logger.Info("Adapter registration complete")
 }
 
-func loadStartupDiarizationModel(ctx context.Context, userRepo repository.UserRepository, unifiedProcessor *transcription.UnifiedJobProcessor) {
+func loadStartupDiarizationModel(ctx context.Context, userRepo repository.UserRepository, profileRepo repository.ProfileRepository, unifiedProcessor *transcription.UnifiedJobProcessor) {
 	users, _, err := userRepo.List(ctx, 0, 100)
 	if err != nil {
 		logger.Warn("Failed to load startup diarization preference", "error", err)
@@ -265,10 +265,15 @@ func loadStartupDiarizationModel(ctx context.Context, userRepo repository.UserRe
 		}
 
 		logger.Startup("diarization", "Loading persistent diarization model configured for startup")
-		loadCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-		status, err := unifiedProcessor.LoadPersistentDiarizationModel(loadCtx, modelID, map[string]interface{}{
+		params := map[string]interface{}{
 			"device": "auto",
-		})
+		}
+		if modelID == transcription.ModelPyannote {
+			applyStartupProfileHFToken(ctx, user.ID, user.DefaultProfileID, profileRepo, params)
+		}
+
+		loadCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+		status, err := unifiedProcessor.LoadPersistentDiarizationModel(loadCtx, modelID, params)
 		cancel()
 		if err != nil {
 			logger.Warn("Failed to load startup diarization model", "model_id", modelID, "user_id", user.ID, "error", err)
@@ -278,4 +283,34 @@ func loadStartupDiarizationModel(ctx context.Context, userRepo repository.UserRe
 		logger.Info("Startup diarization model loaded", "model_id", status.ModelID, "pid", status.PID)
 		return
 	}
+}
+
+func applyStartupProfileHFToken(ctx context.Context, userID uint, defaultProfileID *string, profileRepo repository.ProfileRepository, params map[string]interface{}) {
+	if strings.TrimSpace(os.Getenv("HF_TOKEN")) != "" {
+		return
+	}
+	if defaultProfileID == nil || strings.TrimSpace(*defaultProfileID) == "" {
+		logger.Warn("Cannot resolve HF_TOKEN for startup diarization because the user has no default transcription profile", "user_id", userID)
+		return
+	}
+
+	profileID := strings.TrimSpace(*defaultProfileID)
+	profile, err := profileRepo.FindByID(ctx, profileID)
+	if err != nil {
+		logger.Warn("Failed to load default transcription profile for startup diarization", "user_id", userID, "profile_id", profileID, "error", err)
+		return
+	}
+	if profile.Parameters.HfToken == nil || strings.TrimSpace(*profile.Parameters.HfToken) == "" {
+		logger.Warn("Default transcription profile has no HF token for startup diarization", "user_id", userID, "profile_id", profileID)
+		return
+	}
+
+	hfToken := strings.TrimSpace(*profile.Parameters.HfToken)
+	params["hf_token"] = hfToken
+	if err := os.Setenv("HF_TOKEN", hfToken); err != nil {
+		logger.Warn("Failed to set HF_TOKEN from default transcription profile", "user_id", userID, "profile_id", profileID, "error", err)
+		return
+	}
+
+	logger.Info("Resolved HF_TOKEN from default transcription profile for startup diarization", "user_id", userID, "profile_id", profileID)
 }
