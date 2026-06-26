@@ -7,6 +7,7 @@ requests on stdin and writes newline-delimited JSON responses on stdout.
 
 import argparse
 import contextlib
+import gc
 import json
 import os
 from pathlib import Path
@@ -31,6 +32,29 @@ def resolve_device(device):
         print("CUDA requested but not available, using CPU", file=sys.stderr)
         return "cpu"
     return device
+
+
+def reserve_cuda_vram(reserve_mb, device):
+    if device != "cuda" or reserve_mb <= 0:
+        return None
+
+    reserve_bytes = int(reserve_mb) * 1024 * 1024
+    reservation = torch.empty((reserve_bytes,), dtype=torch.uint8, device=torch.device("cuda"))
+    torch.cuda.synchronize()
+    print(f"Reserved {reserve_mb} MiB of CUDA VRAM for persistent Sortformer", file=sys.stderr)
+    return reservation
+
+
+def release_cuda_vram(reservation):
+    if reservation is None:
+        return None
+
+    del reservation
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    print("Released persistent Sortformer CUDA VRAM reservation", file=sys.stderr)
+    return None
 
 
 def model_path_from_virtual_env():
@@ -75,12 +99,15 @@ def run_diarization(diar_model, request):
 def main():
     parser = argparse.ArgumentParser(description="Persistent Sortformer diarization worker")
     parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
+    parser.add_argument("--reserve-vram-mb", type=int, default=0)
     args = parser.parse_args()
 
+    reservation = None
     try:
         device = resolve_device(args.device)
         with contextlib.redirect_stdout(sys.stderr):
             diar_model = load_model(device)
+            reservation = reserve_cuda_vram(args.reserve_vram_mb, device)
         send({"type": "ready", "ok": True, "model_id": "sortformer", "device": device})
     except Exception as exc:
         traceback.print_exc(file=sys.stderr)
@@ -106,10 +133,17 @@ def main():
                 raise ValueError(f"Unsupported action: {action}")
 
             with contextlib.redirect_stdout(sys.stderr):
+                reservation = release_cuda_vram(reservation)
                 run_diarization(diar_model, request)
+                reservation = reserve_cuda_vram(args.reserve_vram_mb, device)
             send({"type": "response", "id": request_id, "ok": True})
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    reservation = reserve_cuda_vram(args.reserve_vram_mb, device)
+            except Exception as reserve_exc:
+                print(f"Warning: could not reacquire Sortformer VRAM reservation: {reserve_exc}", file=sys.stderr)
             send({
                 "type": "response",
                 "id": request.get("id"),

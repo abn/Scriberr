@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,8 @@ const (
 
 	PersistentDiarizationModelPyAnnote   = "pyannote"
 	PersistentDiarizationModelSortformer = "sortformer"
+
+	PersistentDiarizationDefaultVRAMReserveMB = 3000
 )
 
 var errPersistentWorkerStopped = errors.New("persistent diarization worker stopped")
@@ -325,6 +328,7 @@ func startPersistentDiarizationWorker(ctx context.Context, modelID, envPath stri
 func persistentDiarizationWorkerArgs(modelID, envPath, scriptPath string, params map[string]interface{}) ([]string, error) {
 	args := []string{"run", "--native-tls", "--project", envPath, "python", scriptPath}
 	device := stringParam(params, "device", "auto")
+	reserveVRAMMB := intParam(params, "reserve_vram_mb", PersistentDiarizationDefaultVRAMReserveMB)
 
 	switch modelID {
 	case PersistentDiarizationModelPyAnnote:
@@ -339,9 +343,13 @@ func persistentDiarizationWorkerArgs(modelID, envPath, scriptPath string, params
 			"--hf-token", hfToken,
 			"--model", stringParam(params, "model", "pyannote/speaker-diarization-community-1"),
 			"--device", device,
+			"--reserve-vram-mb", strconv.Itoa(reserveVRAMMB),
 		)
 	case PersistentDiarizationModelSortformer:
-		args = append(args, "--device", device)
+		args = append(args,
+			"--device", device,
+			"--reserve-vram-mb", strconv.Itoa(reserveVRAMMB),
+		)
 	default:
 		return nil, fmt.Errorf("unsupported persistent diarization model: %s", modelID)
 	}
@@ -533,6 +541,26 @@ func stringParam(params map[string]interface{}, key, fallback string) string {
 	if value, ok := params[key]; ok {
 		if str, ok := value.(string); ok && str != "" {
 			return str
+		}
+	}
+	return fallback
+}
+
+func intParam(params map[string]interface{}, key string, fallback int) int {
+	if params == nil {
+		return fallback
+	}
+	switch value := params[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil {
+			return parsed
 		}
 	}
 	return fallback

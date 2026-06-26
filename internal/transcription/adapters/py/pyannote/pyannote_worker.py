@@ -8,6 +8,7 @@ on stdin and writes newline-delimited JSON responses on stdout.
 import argparse
 import contextlib
 import copy
+import gc
 import json
 import os
 from pathlib import Path
@@ -25,20 +26,50 @@ def send(message):
     sys.stdout.flush()
 
 
+def resolve_device(device):
+    if device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        print("CUDA requested but not available, using CPU", file=sys.stderr)
+        return "cpu"
+    return device
+
+
+def reserve_cuda_vram(reserve_mb, device):
+    if device != "cuda" or reserve_mb <= 0:
+        return None
+
+    reserve_bytes = int(reserve_mb) * 1024 * 1024
+    reservation = torch.empty((reserve_bytes,), dtype=torch.uint8, device=torch.device("cuda"))
+    torch.cuda.synchronize()
+    print(f"Reserved {reserve_mb} MiB of CUDA VRAM for persistent PyAnnote", file=sys.stderr)
+    return reservation
+
+
+def release_cuda_vram(reservation):
+    if reservation is None:
+        return None
+
+    del reservation
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    print("Released persistent PyAnnote CUDA VRAM reservation", file=sys.stderr)
+    return None
+
+
 def load_pipeline(args):
     print(f"Loading persistent PyAnnote pipeline: {args.model}", file=sys.stderr)
     pipeline = Pipeline.from_pretrained(args.model, token=args.hf_token)
+    device = resolve_device(args.device)
 
-    if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()):
-        if torch.cuda.is_available():
-            pipeline = pipeline.to(torch.device("cuda"))
-            print("Using CUDA for persistent PyAnnote diarization", file=sys.stderr)
-        else:
-            print("CUDA requested but not available, using CPU", file=sys.stderr)
+    if device == "cuda":
+        pipeline = pipeline.to(torch.device("cuda"))
+        print("Using CUDA for persistent PyAnnote diarization", file=sys.stderr)
     else:
         print("Using CPU for persistent PyAnnote diarization", file=sys.stderr)
 
-    return pipeline
+    return pipeline, device
 
 
 def instantiate_for_request(pipeline, base_params, request):
@@ -96,12 +127,15 @@ def main():
     parser.add_argument("--hf-token", required=True)
     parser.add_argument("--model", default="pyannote/speaker-diarization-community-1")
     parser.add_argument("--device", choices=["cpu", "cuda", "auto"], default="auto")
+    parser.add_argument("--reserve-vram-mb", type=int, default=0)
     args = parser.parse_args()
 
+    reservation = None
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            pipeline = load_pipeline(args)
+            pipeline, device = load_pipeline(args)
             base_params = copy.deepcopy(pipeline.parameters(instantiated=True))
+            reservation = reserve_cuda_vram(args.reserve_vram_mb, device)
         send({"type": "ready", "ok": True, "model_id": "pyannote", "model": args.model})
     except Exception as exc:
         traceback.print_exc(file=sys.stderr)
@@ -127,10 +161,17 @@ def main():
                 raise ValueError(f"Unsupported action: {action}")
 
             with contextlib.redirect_stdout(sys.stderr):
+                reservation = release_cuda_vram(reservation)
                 run_diarization(pipeline, base_params, request)
+                reservation = reserve_cuda_vram(args.reserve_vram_mb, device)
             send({"type": "response", "id": request_id, "ok": True})
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    reservation = reserve_cuda_vram(args.reserve_vram_mb, device)
+            except Exception as reserve_exc:
+                print(f"Warning: could not reacquire PyAnnote VRAM reservation: {reserve_exc}", file=sys.stderr)
             send({
                 "type": "response",
                 "id": request.get("id"),
