@@ -29,6 +29,7 @@ const (
 	PersistentDiarizationModelSortformer = "sortformer"
 
 	PersistentDiarizationDefaultVRAMReserveMB = 2700
+	persistentDiarizationRestoreTimeout       = 10 * time.Minute
 )
 
 var errPersistentWorkerStopped = errors.New("persistent diarization worker stopped")
@@ -46,10 +47,14 @@ type PersistentDiarizationStatus struct {
 
 // PersistentDiarizationManager owns the single resident diarization process.
 type PersistentDiarizationManager struct {
-	mu       sync.RWMutex
-	envPaths map[string]string
-	worker   *persistentDiarizationWorker
-	status   PersistentDiarizationStatus
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
+	envPaths    map[string]string
+	worker      *persistentDiarizationWorker
+	status      PersistentDiarizationStatus
+	loadParams  map[string]interface{}
+	startWorker func(context.Context, string, string, map[string]interface{}) (*persistentDiarizationWorker, error)
+	stopWorker  func(context.Context, *persistentDiarizationWorker) error
 }
 
 var persistentDiarizationManager = NewPersistentDiarizationManager()
@@ -57,7 +62,11 @@ var persistentDiarizationManager = NewPersistentDiarizationManager()
 // NewPersistentDiarizationManager creates a manager with no loaded model.
 func NewPersistentDiarizationManager() *PersistentDiarizationManager {
 	return &PersistentDiarizationManager{
-		envPaths: make(map[string]string),
+		envPaths:    make(map[string]string),
+		startWorker: startPersistentDiarizationWorker,
+		stopWorker: func(ctx context.Context, worker *persistentDiarizationWorker) error {
+			return worker.Stop(ctx)
+		},
 		status: PersistentDiarizationStatus{
 			State: PersistentDiarizationStateUnloaded,
 		},
@@ -99,6 +108,17 @@ func (m *PersistentDiarizationManager) IsModelLoaded(modelID string) bool {
 
 // Load starts a resident diarization worker and waits until the model is loaded.
 func (m *PersistentDiarizationManager) Load(ctx context.Context, modelID string, params map[string]interface{}) (PersistentDiarizationStatus, error) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return m.Status(), fmt.Errorf("loading persistent diarization model cancelled: %w", err)
+	}
+
+	return m.load(ctx, modelID, params)
+}
+
+func (m *PersistentDiarizationManager) load(ctx context.Context, modelID string, params map[string]interface{}) (PersistentDiarizationStatus, error) {
 	modelID = normalizePersistentDiarizationModel(modelID)
 	if modelID == "" {
 		return m.Status(), fmt.Errorf("unsupported diarization model")
@@ -129,7 +149,7 @@ func (m *PersistentDiarizationManager) Load(ctx context.Context, modelID string,
 	}
 	m.mu.Unlock()
 
-	worker, err := startPersistentDiarizationWorker(ctx, modelID, envPath, params)
+	worker, err := m.startWorker(ctx, modelID, envPath, params)
 	if err != nil {
 		m.setFailed(modelID, startedAt, err)
 		return m.Status(), err
@@ -137,6 +157,7 @@ func (m *PersistentDiarizationManager) Load(ctx context.Context, modelID string,
 
 	m.mu.Lock()
 	m.worker = worker
+	m.loadParams = cloneDiarizationParams(params)
 	m.status = PersistentDiarizationStatus{
 		State:       PersistentDiarizationStateLoaded,
 		Loaded:      true,
@@ -154,8 +175,20 @@ func (m *PersistentDiarizationManager) Load(ctx context.Context, modelID string,
 
 // Unload stops the resident diarization worker, if one is running.
 func (m *PersistentDiarizationManager) Unload(ctx context.Context) (PersistentDiarizationStatus, error) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return m.Status(), fmt.Errorf("unloading persistent diarization model cancelled: %w", err)
+	}
+
+	return m.unload(ctx)
+}
+
+func (m *PersistentDiarizationManager) unload(ctx context.Context) (PersistentDiarizationStatus, error) {
 	m.mu.Lock()
 	if m.worker == nil {
+		m.loadParams = nil
 		m.status = PersistentDiarizationStatus{State: PersistentDiarizationStateUnloaded}
 		status := m.status
 		m.mu.Unlock()
@@ -170,7 +203,7 @@ func (m *PersistentDiarizationManager) Unload(ctx context.Context) (PersistentDi
 	status := m.status
 	m.mu.Unlock()
 
-	if err := worker.Stop(ctx); err != nil {
+	if err := m.stopWorker(ctx, worker); err != nil {
 		m.setFailed(modelID, derefTime(startedAt), err)
 		return m.Status(), err
 	}
@@ -178,6 +211,7 @@ func (m *PersistentDiarizationManager) Unload(ctx context.Context) (PersistentDi
 	m.mu.Lock()
 	if m.worker == worker {
 		m.worker = nil
+		m.loadParams = nil
 		m.status = PersistentDiarizationStatus{State: PersistentDiarizationStateUnloaded}
 		status = m.status
 	}
@@ -185,6 +219,87 @@ func (m *PersistentDiarizationManager) Unload(ctx context.Context) (PersistentDi
 
 	logger.Info("Persistent diarization model unloaded", "model_id", modelID)
 	return status, nil
+}
+
+// WithTemporaryModel runs diarization with modelID, temporarily replacing and
+// then restoring a different resident model when necessary. The temporary
+// worker inherits the resident worker's VRAM reservation size.
+func (m *PersistentDiarizationManager) WithTemporaryModel(
+	ctx context.Context,
+	modelID string,
+	params map[string]interface{},
+	run func() error,
+) (resultErr error) {
+	modelID = normalizePersistentDiarizationModel(modelID)
+	if modelID == "" {
+		return fmt.Errorf("unsupported diarization model")
+	}
+	if run == nil {
+		return fmt.Errorf("temporary diarization callback is required")
+	}
+
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("temporary diarization model swap cancelled: %w", err)
+	}
+
+	m.mu.RLock()
+	residentLoaded := m.worker != nil && m.status.Loaded
+	residentModelID := m.status.ModelID
+	residentParams := cloneDiarizationParams(m.loadParams)
+	m.mu.RUnlock()
+
+	if !residentLoaded || residentModelID == modelID {
+		return run()
+	}
+
+	temporaryParams := cloneDiarizationParams(params)
+	temporaryParams["reserve_vram_mb"] = intParam(
+		residentParams,
+		"reserve_vram_mb",
+		PersistentDiarizationDefaultVRAMReserveMB,
+	)
+
+	logger.Info("Temporarily swapping persistent diarization model",
+		"resident_model_id", residentModelID,
+		"temporary_model_id", modelID,
+		"reserve_vram_mb", temporaryParams["reserve_vram_mb"])
+
+	if _, err := m.unload(ctx); err != nil {
+		restoreErr := m.restoreResidentModel(residentModelID, residentParams)
+		return errors.Join(fmt.Errorf("failed to unload resident diarization model: %w", err), restoreErr)
+	}
+
+	if _, err := m.load(ctx, modelID, temporaryParams); err != nil {
+		restoreErr := m.restoreResidentModel(residentModelID, residentParams)
+		return errors.Join(fmt.Errorf("failed to load temporary diarization model: %w", err), restoreErr)
+	}
+
+	defer func() {
+		restoreErr := m.restoreResidentModel(residentModelID, residentParams)
+		resultErr = errors.Join(resultErr, restoreErr)
+	}()
+
+	return run()
+}
+
+func (m *PersistentDiarizationManager) restoreResidentModel(modelID string, params map[string]interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), persistentDiarizationRestoreTimeout)
+	defer cancel()
+
+	var restoreErr error
+	if _, err := m.unload(ctx); err != nil {
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("failed to unload temporary diarization model: %w", err))
+	}
+	if _, err := m.load(ctx, modelID, params); err != nil {
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("failed to restore resident diarization model: %w", err))
+		return restoreErr
+	}
+
+	logger.Info("Restored persistent diarization model", "model_id", modelID)
+	return restoreErr
 }
 
 // Diarize runs a request through the resident model. The caller still owns output parsing.
@@ -205,6 +320,7 @@ func (m *PersistentDiarizationManager) Diarize(ctx context.Context, modelID stri
 		m.mu.Lock()
 		if m.worker == worker {
 			m.worker = nil
+			m.loadParams = nil
 			m.status = PersistentDiarizationStatus{
 				State:       PersistentDiarizationStateFailed,
 				Loaded:      false,
@@ -222,6 +338,7 @@ func (m *PersistentDiarizationManager) setFailed(modelID string, startedAt time.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.worker = nil
+	m.loadParams = nil
 	m.status = PersistentDiarizationStatus{
 		State:       PersistentDiarizationStateFailed,
 		ModelID:     modelID,
@@ -229,6 +346,14 @@ func (m *PersistentDiarizationManager) setFailed(modelID string, startedAt time.
 		Error:       err.Error(),
 		StartedAt:   &startedAt,
 	}
+}
+
+func cloneDiarizationParams(params map[string]interface{}) map[string]interface{} {
+	cloned := make(map[string]interface{}, len(params))
+	for key, value := range params {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 type persistentDiarizationWorker struct {

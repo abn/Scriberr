@@ -287,10 +287,11 @@ func (u *UnifiedTranscriptionService) processSingleTrackJob(ctx context.Context,
 
 	var transcriptResult *interfaces.TranscriptResult
 	var diarizationResult *interfaces.DiarizationResult
+	persistentDiarizationStatus := adapters.GetPersistentDiarizationManager().Status()
 	useSeparateDiarization := job.Parameters.Diarize &&
 		diarizationModelID != "" &&
 		(!u.transcriptionIncludesDiarization(transcriptionModelID, job.Parameters) ||
-			adapters.GetPersistentDiarizationManager().IsModelLoaded(diarizationModelID))
+			persistentDiarizationStatus.Loaded)
 
 	if job.Parameters.DiarizationOnly {
 		if !job.Parameters.Diarize {
@@ -336,8 +337,18 @@ func (u *UnifiedTranscriptionService) processSingleTrackJob(ctx context.Context,
 				return fmt.Errorf("failed to get diarization adapter: %w", err)
 			}
 
-			// Use the same preprocessed audio for diarization
-			diarizationResult, err = diarizationAdapter.Diarize(ctx, preprocessedInput, diarizationParams, procCtx)
+			// Use the same preprocessed audio for diarization. If a different
+			// persistent model is resident, swap it out for this task and restore it.
+			err = adapters.GetPersistentDiarizationManager().WithTemporaryModel(
+				ctx,
+				diarizationModelID,
+				diarizationParams,
+				func() error {
+					var diarizationErr error
+					diarizationResult, diarizationErr = diarizationAdapter.Diarize(ctx, preprocessedInput, diarizationParams, procCtx)
+					return diarizationErr
+				},
+			)
 			if err != nil {
 				return fmt.Errorf("diarization failed: %w", err)
 			}
