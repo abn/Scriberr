@@ -53,6 +53,7 @@ func (suite *APIHandlerTestSuite) SetupSuite() {
 	noteRepo := repository.NewNoteRepository(suite.helper.DB)
 	speakerMappingRepo := repository.NewSpeakerMappingRepository(suite.helper.DB)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(suite.helper.DB)
+	systemSettingsRepo := repository.NewSystemSettingsRepository(suite.helper.DB)
 
 	// Initialize services
 	userService := service.NewUserService(userRepo, suite.helper.AuthService)
@@ -85,6 +86,7 @@ func (suite *APIHandlerTestSuite) SetupSuite() {
 		noteRepo,
 		speakerMappingRepo,
 		refreshTokenRepo,
+		systemSettingsRepo,
 		suite.taskQueue,
 		suite.unifiedProcessor,
 		suite.quickTranscription,

@@ -45,6 +45,8 @@ interface DiarizationWorkerStatus {
 	model_id?: string;
 	display_name?: string;
 	error?: string;
+	deployment_mode?: "single_user" | "multi_user";
+	can_manage?: boolean;
 }
 
 export function Header({ onFileSelect, onMultiTrackClick, onDownloadComplete }: HeaderProps) {
@@ -380,9 +382,9 @@ export function Header({ onFileSelect, onMultiTrackClick, onDownloadComplete }: 
 					<Button
 						variant="ghost"
 						size="icon"
-						title={diarizationStatus.loaded ? `${diarizationLabel} loaded` : "Load diarization model"}
+						title={diarizationStatus.can_manage === false ? "Resident model is managed by the deployment owner" : diarizationStatus.loaded ? `${diarizationLabel} loaded` : "Load diarization model"}
 						onClick={handleDiarizationWorkerClick}
-						disabled={isDiarizationBusy}
+						disabled={isDiarizationBusy || diarizationStatus.can_manage === false}
 						className={`relative h-8 w-8 sm:h-10 sm:w-10 rounded-[var(--radius-btn)] cursor-pointer ${
 							diarizationStatus.loaded
 								? "bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15"

@@ -12,6 +12,7 @@ import (
 type UserRepository interface {
 	Repository[models.User]
 	FindByUsername(ctx context.Context, username string) (*models.User, error)
+	FindFirst(ctx context.Context) (*models.User, error)
 	Count(ctx context.Context) (int64, error)
 	CountWithAutoTranscription(ctx context.Context) (int64, error)
 }
@@ -29,6 +30,15 @@ func NewUserRepository(db *gorm.DB) UserRepository {
 func (r *userRepository) FindByUsername(ctx context.Context, username string) (*models.User, error) {
 	var user models.User
 	err := r.db.WithContext(ctx).Where("username = ?", username).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *userRepository) FindFirst(ctx context.Context) (*models.User, error) {
+	var user models.User
+	err := r.db.WithContext(ctx).Order("id ASC").First(&user).Error
 	if err != nil {
 		return nil, err
 	}
@@ -359,6 +369,51 @@ func (r *summaryRepository) GetLatestSummary(ctx context.Context, transcriptionI
 
 func (r *summaryRepository) DeleteByTranscriptionID(ctx context.Context, transcriptionID string) error {
 	return r.db.WithContext(ctx).Where("transcription_id = ?", transcriptionID).Delete(&models.Summary{}).Error
+}
+
+// SystemSettingsRepository manages singleton process-wide settings.
+type SystemSettingsRepository interface {
+	GetOrCreate(ctx context.Context, startupFallback string) (*models.SystemSetting, error)
+	Save(ctx context.Context, settings *models.SystemSetting) error
+}
+
+type systemSettingsRepository struct {
+	db *gorm.DB
+}
+
+func NewSystemSettingsRepository(db *gorm.DB) SystemSettingsRepository {
+	return &systemSettingsRepository{db: db}
+}
+
+func (r *systemSettingsRepository) GetOrCreate(ctx context.Context, startupFallback string) (*models.SystemSetting, error) {
+	settings := models.SystemSetting{ID: 1}
+	err := r.db.WithContext(ctx).First(&settings, 1).Error
+	if err == nil {
+		return &settings, nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
+	deploymentMode, _ := models.NormalizeDeploymentMode("")
+	startupModel, ok := models.NormalizeStartupDiarizationModel(startupFallback)
+	if !ok {
+		startupModel = "none"
+	}
+	settings = models.SystemSetting{
+		ID:                      1,
+		DeploymentMode:          deploymentMode,
+		StartupDiarizationModel: startupModel,
+	}
+	if err := r.db.WithContext(ctx).Create(&settings).Error; err != nil {
+		return nil, err
+	}
+	return &settings, nil
+}
+
+func (r *systemSettingsRepository) Save(ctx context.Context, settings *models.SystemSetting) error {
+	settings.ID = 1
+	return r.db.WithContext(ctx).Save(settings).Error
 }
 
 // ChatRepository handles chat sessions and messages

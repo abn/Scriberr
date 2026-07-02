@@ -190,6 +190,14 @@ func SetupRoutes(handler *Handler, authService *auth.AuthService) *gin.Engine {
 			user.PUT("/settings", handler.UpdateUserSettings)
 		}
 
+		// Process-wide settings (JWT required; writes are owner-restricted in multi-user mode)
+		system := v1.Group("/system")
+		system.Use(middleware.JWTOnlyMiddleware(authService))
+		{
+			system.GET("/settings", handler.GetSystemSettings)
+			system.PUT("/settings", handler.UpdateSystemSettings)
+		}
+
 		// Admin routes (require authentication)
 		admin := v1.Group("/admin")
 		admin.Use(middleware.AuthMiddleware(authService))

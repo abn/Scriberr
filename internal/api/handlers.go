@@ -48,6 +48,7 @@ type Handler struct {
 	noteRepo            repository.NoteRepository
 	speakerMappingRepo  repository.SpeakerMappingRepository
 	refreshTokenRepo    repository.RefreshTokenRepository
+	systemSettingsRepo  repository.SystemSettingsRepository
 	taskQueue           *queue.TaskQueue
 	unifiedProcessor    *transcription.UnifiedJobProcessor
 	quickTranscription  *transcription.QuickTranscriptionService
@@ -71,6 +72,7 @@ func NewHandler(
 	noteRepo repository.NoteRepository,
 	speakerMappingRepo repository.SpeakerMappingRepository,
 	refreshTokenRepo repository.RefreshTokenRepository,
+	systemSettingsRepo repository.SystemSettingsRepository,
 	taskQueue *queue.TaskQueue,
 	unifiedProcessor *transcription.UnifiedJobProcessor,
 	quickTranscription *transcription.QuickTranscriptionService,
@@ -92,6 +94,7 @@ func NewHandler(
 		noteRepo:            noteRepo,
 		speakerMappingRepo:  speakerMappingRepo,
 		refreshTokenRepo:    refreshTokenRepo,
+		systemSettingsRepo:  systemSettingsRepo,
 		taskQueue:           taskQueue,
 		unifiedProcessor:    unifiedProcessor,
 		quickTranscription:  quickTranscription,
@@ -2268,7 +2271,24 @@ func (h *Handler) GetSupportedModels(c *gin.Context) {
 // @Security ApiKeyAuth
 // @Security BearerAuth
 func (h *Handler) GetDiarizationWorkerStatus(c *gin.Context) {
-	c.JSON(http.StatusOK, h.unifiedProcessor.GetPersistentDiarizationStatus())
+	settings, err := h.systemSettingsRepo.GetOrCreate(c.Request.Context(), "none")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load system settings"})
+		return
+	}
+
+	status := h.unifiedProcessor.GetPersistentDiarizationStatus()
+	c.JSON(http.StatusOK, gin.H{
+		"state":           status.State,
+		"loaded":          status.Loaded,
+		"model_id":        status.ModelID,
+		"display_name":    status.DisplayName,
+		"error":           status.Error,
+		"started_at":      status.StartedAt,
+		"pid":             status.PID,
+		"deployment_mode": settings.DeploymentMode,
+		"can_manage":      h.canManageGlobalDiarization(c, settings),
+	})
 }
 
 // @Summary Load persistent diarization model
@@ -2282,6 +2302,10 @@ func (h *Handler) GetDiarizationWorkerStatus(c *gin.Context) {
 // @Security ApiKeyAuth
 // @Security BearerAuth
 func (h *Handler) LoadDiarizationWorker(c *gin.Context) {
+	if !h.requireGlobalDiarizationControl(c) {
+		return
+	}
+
 	var req DiarizationWorkerLoadRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -2367,6 +2391,10 @@ func (h *Handler) resolveRequestDefaultProfile(c *gin.Context) *models.Transcrip
 // @Security ApiKeyAuth
 // @Security BearerAuth
 func (h *Handler) UnloadDiarizationWorker(c *gin.Context) {
+	if !h.requireGlobalDiarizationControl(c) {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 
@@ -3021,13 +3049,11 @@ func (h *Handler) SetUserDefaultProfile(c *gin.Context) {
 type UserSettingsResponse struct {
 	AutoTranscriptionEnabled bool    `json:"auto_transcription_enabled"`
 	DefaultProfileID         *string `json:"default_profile_id,omitempty"`
-	StartupDiarizationModel  string  `json:"startup_diarization_model"`
 }
 
 // UpdateUserSettingsRequest represents the request to update user settings
 type UpdateUserSettingsRequest struct {
-	AutoTranscriptionEnabled *bool   `json:"auto_transcription_enabled,omitempty"`
-	StartupDiarizationModel  *string `json:"startup_diarization_model,omitempty"`
+	AutoTranscriptionEnabled *bool `json:"auto_transcription_enabled,omitempty"`
 }
 
 // @Summary Get user settings
@@ -3055,7 +3081,6 @@ func (h *Handler) GetUserSettings(c *gin.Context) {
 	response := UserSettingsResponse{
 		AutoTranscriptionEnabled: user.AutoTranscriptionEnabled,
 		DefaultProfileID:         user.DefaultProfileID,
-		StartupDiarizationModel:  normalizeStartupDiarizationSetting(user.StartupDiarizationModel),
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -3096,15 +3121,6 @@ func (h *Handler) UpdateUserSettings(c *gin.Context) {
 	if req.AutoTranscriptionEnabled != nil {
 		user.AutoTranscriptionEnabled = *req.AutoTranscriptionEnabled
 	}
-	if req.StartupDiarizationModel != nil {
-		normalized, ok := validateStartupDiarizationSetting(*req.StartupDiarizationModel)
-		if !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "startup_diarization_model must be one of: none, pyannote, sortformer"})
-			return
-		}
-		user.StartupDiarizationModel = normalized
-	}
-
 	// Save updated user
 	if err := h.userRepo.Update(c.Request.Context(), user); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update settings"})
@@ -3114,33 +3130,9 @@ func (h *Handler) UpdateUserSettings(c *gin.Context) {
 	response := UserSettingsResponse{
 		AutoTranscriptionEnabled: user.AutoTranscriptionEnabled,
 		DefaultProfileID:         user.DefaultProfileID,
-		StartupDiarizationModel:  normalizeStartupDiarizationSetting(user.StartupDiarizationModel),
 	}
 
 	c.JSON(http.StatusOK, response)
-}
-
-func validateStartupDiarizationSetting(value string) (string, bool) {
-	normalized := normalizeStartupDiarizationSetting(value)
-	switch normalized {
-	case "none", "pyannote", "sortformer":
-		return normalized, true
-	default:
-		return "", false
-	}
-}
-
-func normalizeStartupDiarizationSetting(value string) string {
-	switch strings.TrimSpace(strings.ToLower(value)) {
-	case "", "none":
-		return "none"
-	case "pyannote", "pyannote/speaker-diarization-3.1", "pyannote/speaker-diarization-community-1":
-		return "pyannote"
-	case "sortformer", "nvidia_sortformer", "nvidia/diar_streaming_sortformer_4spk-v2":
-		return "sortformer"
-	default:
-		return strings.TrimSpace(strings.ToLower(value))
-	}
 }
 
 // @Summary SSE Events

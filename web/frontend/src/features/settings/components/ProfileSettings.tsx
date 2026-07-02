@@ -21,7 +21,6 @@ interface TranscriptionProfile {
 interface UserSettings {
 	auto_transcription_enabled: boolean;
 	default_profile_id?: string;
-	startup_diarization_model: string;
 }
 
 export function ProfileSettings() {
@@ -158,37 +157,6 @@ export function ProfileSettings() {
 		}
 	};
 
-	const handleStartupDiarizationModelChange = async (model: string) => {
-		setError("");
-		setSuccess("");
-
-		try {
-			const response = await fetch("/api/v1/user/settings", {
-				method: "PUT",
-				headers: {
-					"Content-Type": "application/json",
-					...getAuthHeaders(),
-				},
-				body: JSON.stringify({
-					startup_diarization_model: model,
-				}),
-			});
-
-			if (response.ok) {
-				const updatedSettings = await response.json();
-				setUserSettings(updatedSettings);
-				const label = model === "none" ? "No startup diarization model" : `${model === "pyannote" ? "PyAnnote" : "Sortformer"} at startup`;
-				setSuccess(`Startup diarization setting updated: ${label}.`);
-			} else {
-				const errorData = await response.json();
-				setError(errorData.error || "Failed to update startup diarization setting");
-			}
-		} catch (error) {
-			console.error("Error updating startup diarization setting:", error);
-			setError("Network error. Please try again.");
-		}
-	};
-
 	const handleCreateProfile = useCallback(() => {
 		setEditingProfile(null);
 		setProfileDialogOpen(true);
@@ -306,30 +274,6 @@ export function ProfileSettings() {
 							/>
 						</div>
 
-						<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-[var(--border-subtle)] pt-4">
-							<div>
-								<Label htmlFor="startup-diarization-model" className="text-[var(--text-primary)] font-medium">
-									Load Diarization Model at Startup
-								</Label>
-								<p className="text-sm text-[var(--text-secondary)] mt-1">
-									Keep a diarization model resident in GPU memory after Scriberr starts.
-								</p>
-							</div>
-							<Select
-								value={userSettings?.startup_diarization_model || "none"}
-								onValueChange={handleStartupDiarizationModelChange}
-								disabled={settingsLoading}
-							>
-								<SelectTrigger id="startup-diarization-model" className="w-full sm:w-56 bg-[var(--bg-main)] border-[var(--border-subtle)] text-[var(--text-primary)]">
-									<SelectValue placeholder="Choose a model" />
-								</SelectTrigger>
-								<SelectContent className="bg-[var(--bg-card)] border-[var(--border-subtle)] text-[var(--text-primary)]">
-									<SelectItem value="none" className="focus:bg-[var(--bg-secondary)] focus:text-[var(--text-primary)]">None</SelectItem>
-									<SelectItem value="pyannote" className="focus:bg-[var(--bg-secondary)] focus:text-[var(--text-primary)]">PyAnnote</SelectItem>
-									<SelectItem value="sortformer" className="focus:bg-[var(--bg-secondary)] focus:text-[var(--text-primary)]">Sortformer</SelectItem>
-								</SelectContent>
-							</Select>
-						</div>
 					</div>
 				)}
 			</div>

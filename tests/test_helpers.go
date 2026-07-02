@@ -101,6 +101,7 @@ func (h *TestHelper) ResetDB(t *testing.T) {
 		&models.LLMConfig{},
 		&models.APIKey{},
 		&models.User{},
+		&models.SystemSetting{},
 	}
 
 	for _, model := range modelsToClean {
