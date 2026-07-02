@@ -29,8 +29,8 @@ func TestPersistentDiarizationWorkerArgsDefaultVRAMReservation(t *testing.T) {
 				t.Fatalf("expected worker args, got error: %v", err)
 			}
 
-			if !argsHaveFlagValue(args, "--reserve-vram-mb", "3000") {
-				t.Fatalf("expected default 3000 MiB reservation in args: %#v", args)
+			if !argsHaveFlagValue(args, "--reserve-vram-mb", "2700") {
+				t.Fatalf("expected default 2700 MiB reservation in args: %#v", args)
 			}
 		})
 	}

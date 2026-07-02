@@ -28,7 +28,7 @@ const (
 	PersistentDiarizationModelPyAnnote   = "pyannote"
 	PersistentDiarizationModelSortformer = "sortformer"
 
-	PersistentDiarizationDefaultVRAMReserveMB = 3000
+	PersistentDiarizationDefaultVRAMReserveMB = 2700
 )
 
 var errPersistentWorkerStopped = errors.New("persistent diarization worker stopped")
