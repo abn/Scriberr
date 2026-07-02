@@ -364,7 +364,7 @@ type persistentDiarizationWorker struct {
 	ready       chan workerProtocolMessage
 	done        chan error
 	requestMu   sync.Mutex
-	stopMu      sync.Mutex
+	protocolMu  sync.Mutex
 	stopped     bool
 	protocolEnc *json.Encoder
 }
@@ -494,9 +494,16 @@ func (w *persistentDiarizationWorker) Request(ctx context.Context, payload map[s
 	request["id"] = requestID
 	request["action"] = "diarize"
 
+	w.protocolMu.Lock()
+	if w.stopped {
+		w.protocolMu.Unlock()
+		return errPersistentWorkerStopped
+	}
 	if err := w.protocolEnc.Encode(request); err != nil {
+		w.protocolMu.Unlock()
 		return fmt.Errorf("failed to send diarization request: %w", err)
 	}
+	w.protocolMu.Unlock()
 
 	for {
 		select {
@@ -525,18 +532,21 @@ func (w *persistentDiarizationWorker) Request(ctx context.Context, payload map[s
 }
 
 func (w *persistentDiarizationWorker) Stop(ctx context.Context) error {
-	w.stopMu.Lock()
+	w.protocolMu.Lock()
 	if w.stopped {
-		w.stopMu.Unlock()
+		w.protocolMu.Unlock()
 		return nil
 	}
 	w.stopped = true
-	w.stopMu.Unlock()
-
-	_ = w.protocolEnc.Encode(map[string]interface{}{
+	err := w.protocolEnc.Encode(map[string]interface{}{
 		"id":     fmt.Sprintf("shutdown-%d", time.Now().UnixNano()),
 		"action": "shutdown",
 	})
+	w.protocolMu.Unlock()
+	if err != nil {
+		w.forceStop()
+		return fmt.Errorf("failed to send persistent diarization worker shutdown request: %w", err)
+	}
 
 	killed := false
 	select {
@@ -562,9 +572,9 @@ func (w *persistentDiarizationWorker) Stop(ctx context.Context) error {
 }
 
 func (w *persistentDiarizationWorker) forceStop() {
-	w.stopMu.Lock()
+	w.protocolMu.Lock()
 	w.stopped = true
-	w.stopMu.Unlock()
+	w.protocolMu.Unlock()
 
 	if w.cmd != nil && w.cmd.Process != nil {
 		_ = w.cmd.Process.Kill()

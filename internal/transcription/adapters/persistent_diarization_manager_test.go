@@ -2,10 +2,13 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestPersistentDiarizationWorkerArgsDefaultVRAMReservation(t *testing.T) {
@@ -52,6 +55,52 @@ func TestPersistentDiarizationWorkerArgsOverrideVRAMReservation(t *testing.T) {
 
 	if !argsHaveFlagValue(args, "--reserve-vram-mb", "1024") {
 		t.Fatalf("expected overridden 1024 MiB reservation in args: %#v", args)
+	}
+}
+
+func TestPersistentDiarizationWorkerStopSerializesProtocolWrites(t *testing.T) {
+	writer := newBlockingProtocolWriter()
+	done := make(chan error, 1)
+	worker := &persistentDiarizationWorker{
+		modelID:     PersistentDiarizationModelSortformer,
+		responses:   make(chan workerProtocolMessage),
+		done:        done,
+		protocolEnc: json.NewEncoder(writer),
+	}
+
+	requestErr := make(chan error, 1)
+	go func() {
+		requestErr <- worker.Request(context.Background(), map[string]interface{}{"audio_file": "test.wav"})
+	}()
+	<-writer.firstWriteStarted
+
+	// Release the deliberately blocked request write after either observing an
+	// unsafe overlapping shutdown write or allowing Stop time to block on the
+	// protocol mutex.
+	go func() {
+		select {
+		case <-writer.concurrentWrite:
+		case <-time.After(50 * time.Millisecond):
+		}
+		close(writer.releaseFirstWrite)
+	}()
+
+	go func() {
+		<-writer.secondWriteFinished
+		done <- nil
+		close(done)
+	}()
+
+	stopErr := worker.Stop(context.Background())
+
+	if err := <-requestErr; !errors.Is(err, errPersistentWorkerStopped) {
+		t.Fatalf("expected request to observe worker shutdown, got %v", err)
+	}
+	if stopErr != nil {
+		t.Fatalf("stop worker: %v", stopErr)
+	}
+	if writer.hadConcurrentWrite() {
+		t.Fatal("request and shutdown messages were written concurrently")
 	}
 }
 
@@ -168,4 +217,59 @@ func argsHaveFlagValue(args []string, flag string, value string) bool {
 		}
 	}
 	return false
+}
+
+type blockingProtocolWriter struct {
+	mu                  sync.Mutex
+	activeWrites        int
+	writes              int
+	concurrent          bool
+	firstWriteStarted   chan struct{}
+	releaseFirstWrite   chan struct{}
+	secondWriteFinished chan struct{}
+	concurrentWrite     chan struct{}
+	concurrentOnce      sync.Once
+	secondWriteOnce     sync.Once
+}
+
+func newBlockingProtocolWriter() *blockingProtocolWriter {
+	return &blockingProtocolWriter{
+		firstWriteStarted:   make(chan struct{}),
+		releaseFirstWrite:   make(chan struct{}),
+		secondWriteFinished: make(chan struct{}),
+		concurrentWrite:     make(chan struct{}),
+	}
+}
+
+func (w *blockingProtocolWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.activeWrites++
+	w.writes++
+	writeNumber := w.writes
+	if w.activeWrites > 1 {
+		w.concurrent = true
+		w.concurrentOnce.Do(func() { close(w.concurrentWrite) })
+	}
+	if writeNumber == 1 {
+		close(w.firstWriteStarted)
+	}
+	w.mu.Unlock()
+
+	if writeNumber == 1 {
+		<-w.releaseFirstWrite
+	}
+
+	w.mu.Lock()
+	w.activeWrites--
+	w.mu.Unlock()
+	if writeNumber == 2 {
+		w.secondWriteOnce.Do(func() { close(w.secondWriteFinished) })
+	}
+	return len(p), nil
+}
+
+func (w *blockingProtocolWriter) hadConcurrentWrite() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.concurrent
 }
